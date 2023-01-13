@@ -6,9 +6,24 @@
 #     make update-deps
 
 # These dependencies are for fastapi including some optional features.
-fastapi
+fastapi!=0.89.0
+python-multipart
 starlette
 uvicorn[standard]
 
 # Other dependencies.
-safir>=3.4.0
+astropy
+asyncpg
+click
+dramatiq[redis]
+google-auth
+google-cloud-storage
+jinja2
+psycopg2
+safir[db,gcs]
+sqlalchemy[asyncio]
+structlog
+
+# Uncomment this, change the branch, comment out safir above, and run make
+# update-deps-no-hashes to test against an unreleased version of Safir.
+#git+https://github.com/lsst-sqre/safir@main#egg=safir[db,gcs]
