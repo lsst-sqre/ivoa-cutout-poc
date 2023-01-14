@@ -6,59 +6,139 @@ The types of exceptions here control the error handling behavior configured in
 
 from __future__ import annotations
 
-from typing import Optional
+import json
+from enum import Enum
+from typing import Any, ClassVar, Optional
 
-from .models import ErrorCode, ErrorType, JobError
+from fastapi import status
+
+from .models import JobError
 
 __all__ = [
-    "DataMissingError",
+    "ErrorLocation",
     "InvalidPhaseError",
-    "ParameterError",
     "PermissionDeniedError",
     "TaskError",
-    "TaskFatalError",
-    "TaskTransientError",
     "UnknownJobError",
-    "UsageError",
     "UWSError",
 ]
+
+
+class ErrorLocation(Enum):
+    """Specifies the request component that triggered a `UWSError`."""
+
+    body = "body"
+    header = "header"
+    path = "path"
+    query = "query"
 
 
 class UWSError(Exception):
     """An error with an associated error code.
 
-    SODA requires errors be in ``text/plain`` and start with an error code.
-    Adopt that as a general representation of errors produced by the UWS
-    layer to simplify generating error responses.
+    There is a global handler for this exception and all exceptions derived
+    from it that returns an HTTP status code equal to the ``status_code``
+    class variable with a body that's consistent with the error messages
+    generated internally by FastAPI.  It should be used for all errors from
+    the service.
+
+    Parameters
+    ----------
+    message
+        The error message (used as the ``msg`` key).
+    location
+        The part of the request giving rise to the error.
+    field
+        The field within that part of the request giving rise to the error.
+
+    Attributes
+    ----------
+    location
+        The part of the request giving rise to the error.  This can be
+        modified by the handler before re-raising the error.
+    field
+        The field within that part of the request giving rise to the error.
+        This can be modified by the handler before re-raising the error.
+
+    Notes
+    -----
+    The FastAPI body format supports returning multiple errors at a time as a
+    list in the ``details`` key.  This is currently not implemented.
     """
 
+    error: ClassVar[str] = "unknown_error"
+    """Used as the ``type`` field of the error message.
+
+    Should be overriden by any subclass.
+    """
+
+    status_code: ClassVar[int] = status.HTTP_422_UNPROCESSABLE_ENTITY
+    """HTTP status code for this type of validation error."""
+
     def __init__(
-        self, error_code: ErrorCode, message: str, detail: Optional[str] = None
+        self,
+        message: str,
+        location: Optional[ErrorLocation] = None,
+        field: Optional[str] = None,
     ) -> None:
         super().__init__(message)
-        self.error_code = error_code
-        self.detail = detail
-        self.status_code = 400
+        self.location = location
+        self.field = field
+
+    def to_dict(self) -> dict[str, list[str] | str]:
+        """Convert the exception to a dictionary suitable for the exception.
+
+        Returns
+        -------
+        dict
+            Serialized error emssage to pass as the ``detail`` parameter to a
+            ``fastapi.HTTPException``.  It is designed to produce the same
+            JSON structure as native FastAPI errors.
+        """
+        error: dict[str, Any] = {"msg": str(self), "type": self.error}
+        if self.location and self.field:
+            error["loc"] = [self.location.value, self.field]
+        return error
 
 
-class MultiValuedParameterError(UWSError):
-    """Multiple values not allowed for this parameter."""
+class InvalidPhaseError(UWSError):
+    """The requeted phase transition is invalid."""
 
-    def __init__(self, message: str) -> None:
-        super().__init__(ErrorCode.MULTIVALUED_PARAM_NOT_SUPPORTED, message)
-        self.status_code = 422
+    error = "invalid_phase_transition"
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+class ParameterUnsupportedError(UWSError):
+    """The job parameters passed in were unsupported.
+
+    This exception is primarily intended to be thrown by the
+    ``validate_params`` method of the policy object provided by the
+    application.
+    """
+
+    error = "unsupported_parameter"
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
 
 
 class PermissionDeniedError(UWSError):
     """User does not have access to this resource."""
 
-    def __init__(self, message: str) -> None:
-        super().__init__(ErrorCode.AUTHORIZATION_ERROR, message)
-        self.status_code = 403
+    error = "permission_denied"
+    status_code = status.HTTP_403_FORBIDDEN
+
+
+class SyncTimeoutError(UWSError):
+    """The job ran for longer than the timeout for synchronous jobs."""
+
+    error = "sync_timeout"
+    status_code = status.HTTP_400_BAD_REQUEST
 
 
 class TaskError(UWSError):
     """An error occurred during background task processing."""
+
+    error = "job_execution_error"
+    status_code = status.HTTP_400_BAD_REQUEST
 
     @classmethod
     def from_callback(cls, exception: dict[str, str]) -> TaskError:
@@ -73,103 +153,54 @@ class TaskError(UWSError):
         """
         exception_type = exception["type"]
         exception_message = exception["message"]
-        detail = None
-        if exception_type in ("TaskFatalError", "TaskTransientError"):
+        if exception_type == "TaskError":
             try:
-                error_code_str, rest = exception_message.split(None, 1)
-                error_code = ErrorCode(error_code_str)
-                if "\n" in rest:
-                    message, detail = rest.split("\n", 1)
-                else:
-                    message = rest
+                error = json.loads(exception_message)
+                return cls(
+                    error_code=error["error_code"],
+                    message=error["message"],
+                    detail=error.get("detail"),
+                )
             except Exception:
-                error_code = ErrorCode.ERROR
-                message = exception_message
-            if exception_type == "TaskFatalError":
-                return TaskFatalError(error_code, message, detail)
-            else:
-                return TaskTransientError(error_code, message, detail)
+                return cls(
+                    error_code="unknown_error", message=exception_message
+                )
         else:
             return cls(
-                ErrorType.TRANSIENT,
-                ErrorCode.ERROR,
-                "Unknown error executing task",
-                f"{exception_type}: {exception_message}",
+                error_code="unknown_error",
+                message="Unknown error executing task",
+                detail=f"{exception_type}: {exception_message}",
             )
 
     def __init__(
         self,
-        error_type: ErrorType,
-        error_code: ErrorCode,
+        error_code: str,
         message: str,
         detail: Optional[str] = None,
     ) -> None:
-        super().__init__(error_code, message)
-        self.error_type = error_type
+        data = {"error_code": error_code, "message": message, "detail": detail}
+        super().__init__(json.dumps(data))
+        self.error_code = error_code
+        self.message = message
         self.detail = detail
 
     def to_job_error(self) -> JobError:
         """Convert to a `~vocutouts.uws.models.JobError`."""
         return JobError(
             error_code=self.error_code,
-            error_type=self.error_type,
-            message=str(self),
+            message=self.message,
             detail=self.detail,
         )
 
 
-class TaskFatalError(TaskError):
-    """Fatal error occurred during background task processing.
-
-    The parameters or other job information was invalid and this job will
-    never succeed.
-    """
-
-    def __init__(
-        self, error_code: ErrorCode, message: str, detail: Optional[str] = None
-    ) -> None:
-        super().__init__(ErrorType.FATAL, error_code, message, detail)
-
-
-class TaskTransientError(TaskError):
-    """Transient error occurred during background task processing.
-
-    The job may be retried with the same parameters and may succeed.
-    """
-
-    def __init__(
-        self, error_code: ErrorCode, message: str, detail: Optional[str] = None
-    ) -> None:
-        super().__init__(ErrorType.TRANSIENT, error_code, message, detail)
-
-
-class UsageError(UWSError):
-    """Invalid parameters were passed to a UWS API."""
-
-    def __init__(self, message: str, detail: Optional[str] = None) -> None:
-        super().__init__(ErrorCode.USAGE_ERROR, message, detail)
-        self.status_code = 422
-
-
-class DataMissingError(UWSError):
-    """The data requested does not exist for that job."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(ErrorCode.USAGE_ERROR, message)
-        self.status_code = 404
-
-
-class InvalidPhaseError(UsageError):
-    """The job is in an invalid phase for the desired operation."""
-
-
-class ParameterError(UsageError):
-    """Unsupported value passed to a parameter."""
-
-
-class UnknownJobError(DataMissingError):
+class UnknownJobError(UWSError):
     """The named job could not be found in the database."""
 
+    error = "unknown_job"
+    status_code = status.HTTP_404_NOT_FOUND
+
     def __init__(self, job_id: str) -> None:
-        super().__init__(f"Job {job_id} not found")
+        super().__init__(
+            f"Job {job_id} not found", ErrorLocation.path, "job_id"
+        )
         self.job_id = job_id

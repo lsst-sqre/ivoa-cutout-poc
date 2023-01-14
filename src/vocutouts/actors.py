@@ -55,8 +55,7 @@ __all__ = [
 @dramatiq.actor(queue_name="cutout", max_retries=1, store_results=True)
 def cutout(
     job_id: str,
-    dataset_ids: list[str],
-    stencils: list[dict[str, Any]],
+    params: dict[str, Any],
 ) -> list[dict[str, str]]:
     """Stub for a circle cutout.
 
@@ -68,19 +67,12 @@ def cutout(
     ----------
     job_id
         The UWS job ID, used as the key for storing results.
-    dataset_ids
-        The data objects on which to perform cutouts.  These are opaque
-        identifiers passed as-is to the backend.  The user will normally
-        discover them via some service such as ObsTAP.
-    stencils
-        Serialized stencils for the cutouts to perform.  These are
-        JSON-serializable (a requirement for Dramatiq) representations of the
-        `~vocutouts.models.stencils.Stencil` objects corresponding to the
-        user's request.
+    params
+        A serialized `~vocutouts.models.parameters.CutoutParameters` object.
 
     Returns
     -------
-    list of dict of str to str
+    list
         The results of the job.  This must be a list of dict representations
         of `~vocutouts.uws.models.JobResult` objects.
 

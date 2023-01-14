@@ -30,8 +30,19 @@ async def test_uncaught_error(client: AsyncClient) -> None:
 
     # Now try to start a job, which should throw a meaningful exception.
     with pytest.raises(ProgrammingError):
-        await client.get(
+        await client.post(
             "/api/cutout/sync",
             headers={"X-Auth-Request-User": "someone"},
-            params={"ID": "1:2:band:id", "Pos": "CIRCLE 0 -2 2"},
+            json={
+                "parameters": {
+                    "ids": ["1:2:band:value"],
+                    "stencils": [
+                        {
+                            "type": "circle",
+                            "center": {"ra": 0, "dec": 1},
+                            "radius": 2,
+                        }
+                    ],
+                }
+            },
         )

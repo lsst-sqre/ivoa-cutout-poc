@@ -10,73 +10,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import AsyncClient
+from safir.database import datetime_to_db
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_scoped_session
 
 from vocutouts.uws.dependencies import UWSFactory
-from vocutouts.uws.models import JobParameter
 from vocutouts.uws.schema import Job as SQLJob
 from vocutouts.uws.utils import isodatetime
 
-FULL_JOB_LIST = """
-<uws:jobs
-    version="1.1"
-    xsi:schemaLocation="http://www.ivoa.net/xml/UWS/v1.0 UWS.xsd"
-    xmlns:xml="http://www.w3.org/XML/1998/namespace"
-    xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"
-    xmlns:xlink="http://www.w3.org/1999/xlink"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <uws:jobref id="3" xlink:href="https://example.com/jobs/3">
-    <uws:phase>PENDING</uws:phase>
-    <uws:ownerId>user</uws:ownerId>
-    <uws:creationTime>{}</uws:creationTime>
-  </uws:jobref>
-  <uws:jobref id="2" xlink:href="https://example.com/jobs/2">
-    <uws:phase>PENDING</uws:phase>
-    <uws:runId>some-run-id</uws:runId>
-    <uws:ownerId>user</uws:ownerId>
-    <uws:creationTime>{}</uws:creationTime>
-  </uws:jobref>
-  <uws:jobref id="1" xlink:href="https://example.com/jobs/1">
-    <uws:phase>PENDING</uws:phase>
-    <uws:ownerId>user</uws:ownerId>
-    <uws:creationTime>{}</uws:creationTime>
-  </uws:jobref>
-</uws:jobs>
-"""
-
-RECENT_JOB_LIST = """
-<uws:jobs
-    version="1.1"
-    xsi:schemaLocation="http://www.ivoa.net/xml/UWS/v1.0 UWS.xsd"
-    xmlns:xml="http://www.w3.org/XML/1998/namespace"
-    xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"
-    xmlns:xlink="http://www.w3.org/1999/xlink"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <uws:jobref id="3" xlink:href="https://example.com/jobs/3">
-    <uws:phase>PENDING</uws:phase>
-    <uws:ownerId>user</uws:ownerId>
-    <uws:creationTime>{}</uws:creationTime>
-  </uws:jobref>
-</uws:jobs>
-"""
-
-QUEUED_JOB_LIST = """
-<uws:jobs
-    version="1.1"
-    xsi:schemaLocation="http://www.ivoa.net/xml/UWS/v1.0 UWS.xsd"
-    xmlns:xml="http://www.w3.org/XML/1998/namespace"
-    xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"
-    xmlns:xlink="http://www.w3.org/1999/xlink"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <uws:jobref id="2" xlink:href="https://example.com/jobs/2">
-    <uws:phase>QUEUED</uws:phase>
-    <uws:runId>some-run-id</uws:runId>
-    <uws:ownerId>user</uws:ownerId>
-    <uws:creationTime>{}</uws:creationTime>
-  </uws:jobref>
-</uws:jobs>
-"""
+from ..support.uws import TrivialParameters
 
 
 @pytest.mark.asyncio
@@ -85,38 +27,28 @@ async def test_job_list(
 ) -> None:
     job_service = uws_factory.create_job_service()
     jobs = [
+        await job_service.create("user", params=TrivialParameters(id="bar")),
         await job_service.create(
-            "user", params=[JobParameter(parameter_id="id", value="bar")]
+            "user", run_id="some-run-id", params=TrivialParameters(id="bar")
         ),
-        await job_service.create(
-            "user",
-            run_id="some-run-id",
-            params=[
-                JobParameter(parameter_id="id", value="bar"),
-                JobParameter(parameter_id="circle", value="1 1 1"),
-            ],
-        ),
-        await job_service.create(
-            "user", params=[JobParameter(parameter_id="id", value="foo")]
-        ),
+        await job_service.create("user", params=TrivialParameters(id="foo")),
     ]
 
     # Create an additional job for a different user, which shouldn't appear in
     # any of the lists.
-    await job_service.create(
-        "otheruser", params=[JobParameter(parameter_id="other", value="user")]
-    )
+    await job_service.create("otheruser", params=TrivialParameters(id="user"))
 
     # Adjust the creation time of the jobs so that searches are more
     # interesting.
+    now = datetime.now(tz=timezone.utc)
     async with session.begin():
         for i, job in enumerate(jobs):
             hours = (2 - i) * 2
-            creation = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+            creation = now - timedelta(hours=hours)
             stmt = (
                 update(SQLJob)
-                .where(SQLJob.id == int(job.job_id))
-                .values(creation_time=creation.replace(tzinfo=None))
+                .where(SQLJob.job_id == int(job.job_id))
+                .values(creation_time=datetime_to_db(creation))
             )
             await session.execute(stmt)
             job.creation_time = creation
@@ -124,61 +56,61 @@ async def test_job_list(
     # Retrieve the job list and check it.
     r = await client.get("/jobs", headers={"X-Auth-Request-User": "user"})
     assert r.status_code == 200
-    assert r.headers["Content-Type"] == "application/xml"
-    creation_times = [isodatetime(j.creation_time) for j in jobs]
-    creation_times.reverse()
-    expected = FULL_JOB_LIST.strip().format(*creation_times)
-    assert r.text == expected
+    expected = [
+        {
+            "job_id": "3",
+            "owner": "user",
+            "phase": "pending",
+            "creation_time": isodatetime(jobs[2].creation_time),
+        },
+        {
+            "job_id": "2",
+            "owner": "user",
+            "phase": "pending",
+            "run_id": "some-run-id",
+            "creation_time": isodatetime(jobs[1].creation_time),
+        },
+        {
+            "job_id": "1",
+            "owner": "user",
+            "phase": "pending",
+            "creation_time": isodatetime(jobs[0].creation_time),
+        },
+    ]
+    assert r.json() == expected
 
     # Filter by recency.
-    threshold = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    threshold = now - timedelta(hours=1)
     r = await client.get(
         "/jobs",
         headers={"X-Auth-Request-User": "user"},
         params={"after": isodatetime(threshold)},
     )
     assert r.status_code == 200
-    assert r.headers["Content-Type"] == "application/xml"
-    assert r.text == RECENT_JOB_LIST.strip().format(creation_times[0])
-
-    # Check case-insensitivity.
-    result = r.text
-    r = await client.get(
-        "/jobs",
-        headers={"X-Auth-Request-User": "user"},
-        params={"AFTER": isodatetime(threshold)},
-    )
-    assert r.text == result
-    r = await client.get(
-        "/jobs",
-        headers={"X-Auth-Request-User": "user"},
-        params={"aFTer": isodatetime(threshold)},
-    )
-    assert r.text == result
+    assert r.json() == expected[:1]
 
     # Filter by count.
     r = await client.get(
         "/jobs", headers={"X-Auth-Request-User": "user"}, params={"last": 1}
     )
     assert r.status_code == 200
-    assert r.headers["Content-Type"] == "application/xml"
-    assert r.text == RECENT_JOB_LIST.strip().format(creation_times[0])
+    assert r.json() == expected[:1]
 
     # Start the job.
     r = await client.post(
-        "/jobs/2/phase",
+        "/jobs/2/start",
         headers={"X-Auth-Request-User": "user"},
-        data={"PHASE": "RUN"},
+        json={"start": True},
     )
     assert r.status_code == 303
     assert r.headers["Location"] == "https://example.com/jobs/2"
+    expected[1]["phase"] = "queued"
 
     # Filter by phase.
     r = await client.get(
         "/jobs",
         headers={"X-Auth-Request-User": "user"},
-        params=[("PHASE", "EXECUTING"), ("PHASE", "QUEUED")],
+        params=[("phase", "executing"), ("phase", "queued")],
     )
     assert r.status_code == 200
-    assert r.headers["Content-Type"] == "application/xml"
-    assert r.text == QUEUED_JOB_LIST.strip().format(creation_times[1])
+    assert r.json() == expected[1:2]

@@ -14,9 +14,10 @@ API frontend to dispatch jobs.
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -75,15 +76,22 @@ def job_failed(message: dict[str, Any], exception: dict[str, str]) -> None:
     pass
 
 
-# Exceptions of these names are handled specially by job_failed.
+# Exceptions of this name is handled specially by job_failed.
 
 
-class TaskFatalError(Exception):
-    """Parameters of task are invalid."""
+class TaskError(Exception):
+    """An error occurred when trying to execute the job."""
 
-
-class TaskTransientError(Exception):
-    """Some transient problem occurred."""
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        detail: Optional[str] = None,
+    ) -> None:
+        msg = json.dumps(
+            {"error_code": error_code, "message": message, "detail": detail}
+        )
+        super().__init__(msg)
 
 
 def get_backend(butler_label: str) -> ImageCutoutBackend:
@@ -136,8 +144,7 @@ def parse_uri(uri: str) -> tuple[str, UUID]:
 @dramatiq.actor(queue_name="cutout", max_retries=1, store_results=True)
 def cutout(
     job_id: str,
-    dataset_ids: list[str],
-    stencils: list[dict[str, Any]],
+    params: dict[str, Any],
 ) -> list[dict[str, str]]:
     """Perform a cutout.
 
@@ -151,15 +158,8 @@ def cutout(
     ----------
     job_id
         The UWS job ID, used as the key for storing results.
-    dataset_ids
-        The data objects on which to perform cutouts.  These are opaque
-        identifiers passed as-is to the backend.  The user will normally
-        discover them via some service such as ObsTAP.
-    stencils
-        Serialized stencils for the cutouts to perform.  These are
-        JSON-serializable (a requirement for Dramatiq) representations of the
-        `~vocutouts.models.stencils.Stencil` objects corresponding to the
-        user's request.
+    params
+        A serialized `~vocutouts.models.parameters.CutoutParameters` object.
 
     Returns
     -------
@@ -167,6 +167,8 @@ def cutout(
         The results of the job.  This must be a list of dict representations
         of `~vocutouts.uws.models.JobResult` objects.
     """
+    dataset_ids = params["ids"]
+    stencils = params["stencils"]
     logger = structlog.get_logger(os.getenv("SAFIR_LOGGER", "vocutouts"))
     logger = logger.bind(
         job_id=job_id, dataset_ids=dataset_ids, stencils=stencils
@@ -181,11 +183,11 @@ def cutout(
     if len(dataset_ids) != 1:
         msg = "Only one dataset ID supported"
         logger.warning(msg)
-        raise TaskFatalError(f"UsageError {msg}")
+        raise TaskError("usage_error", msg)
     if len(stencils) != 1:
         msg = "Only one stencil supported"
         logger.warning(msg)
-        raise TaskFatalError(f"UsageError {msg}")
+        raise TaskError("usage_error", msg)
 
     # Parse the dataset ID and retrieve an appropriate backend.
     butler_label, uuid = parse_uri(dataset_ids[0])
@@ -203,14 +205,14 @@ def cutout(
             radius = Angle(stencil_dict["radius"] * u.degree)
             stencil = SkyCircle.from_astropy(center, radius, clip=True)
         elif stencil_dict["type"] == "polygon":
-            ras = [v[0] for v in stencil_dict["vertices"]]
-            decs = [v[1] for v in stencil_dict["vertices"]]
+            ras = [v["ra"] for v in stencil_dict["vertices"]]
+            decs = [v["dec"] for v in stencil_dict["vertices"]]
             vertices = SkyCoord(ras * u.degree, decs * u.degree, frame="icrs")
             stencil = SkyPolygon.from_astropy(vertices, clip=True)
         else:
             msg = f'Unknown stencil type {stencil_dict["type"]}'
             logger.warning(msg)
-            raise TaskFatalError(f"UsageError {msg}")
+            raise TaskError("usage_error", msg)
         sky_stencils.append(stencil)
 
     # Perform the cutout.
@@ -219,8 +221,8 @@ def cutout(
         result = backend.process_uuid(sky_stencils[0], uuid, mask_plane=None)
     except Exception as e:
         logger.exception("Cutout processing failed")
-        msg = f"Error Cutout processing failed\n{type(e).__name__}: {str(e)}"
-        raise TaskTransientError(msg)
+        detail = f"{type(e).__name__}: {str(e)}"
+        raise TaskError("cutout_failed", "Cutout processing failed", detail)
 
     # Return the result URL.  This must be a dict representation of a
     # vocutouts.uws.models.JobResult.
@@ -229,7 +231,7 @@ def cutout(
     if result_scheme != "s3":
         msg = f"Backend returned URL with scheme {result_scheme}, not s3"
         logger.error(msg)
-        raise TaskTransientError(f"Error {msg}")
+        raise TaskError("internal_error", msg)
     logger.info("Cutout successful")
     return [
         {

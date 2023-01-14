@@ -55,7 +55,7 @@ class WorkerSession(Middleware):
                 config.database_password,
                 logger,
                 isolation_level="REPEATABLE READ",
-                statement=select(Job.id),
+                statement=select(Job.job_id).limit(1),
             )
 
 

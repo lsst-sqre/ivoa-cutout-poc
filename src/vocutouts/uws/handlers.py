@@ -17,436 +17,278 @@ example:
 """
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Optional, TypeVar
 
-from fastapi import APIRouter, Depends, Form, Query, Request, Response
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import RedirectResponse
 from safir.dependencies.gafaelfawr import (
     auth_dependency,
     auth_logger_dependency,
 )
 from structlog.stdlib import BoundLogger
 
-from .dependencies import (
-    UWSFactory,
-    uws_dependency,
-    uws_post_params_dependency,
+from .dependencies import UWSFactory, uws_dependency
+from .exceptions import ErrorLocation, PermissionDeniedError
+from .models import (
+    ExecutionPhase,
+    Job,
+    JobCreate,
+    JobDescription,
+    JobStart,
+    JobUpdate,
 )
-from .exceptions import DataMissingError, ParameterError, PermissionDeniedError
-from .models import ExecutionPhase, JobParameter
-from .utils import isodatetime, parse_isodatetime
 
-__all__ = ["uws_router"]
+T = TypeVar("T", bound=JobCreate)
 
-uws_router = APIRouter()
-"""FastAPI router for all external handlers."""
+__all__ = ["add_uws_routes"]
 
 
-@uws_router.get(
-    "",
-    description=(
-        "List all existing jobs for the current user. Jobs will be sorted"
-        " by creation date, with the most recently created listed first."
-    ),
-    responses={200: {"content": {"application/xml": {}}}},
-    summary="Async job list",
-)
-async def get_job_list(
-    request: Request,
-    phase: Optional[list[ExecutionPhase]] = Query(
-        None,
-        title="Execution phase",
-        description="Limit results to the provided execution phases",
-    ),
-    after: Optional[datetime] = Query(
-        None,
-        title="Creation date",
-        description="Limit results to jobs created after this date",
-    ),
-    last: Optional[int] = Query(
-        None,
-        title="Number of jobs",
-        description="Return at most the given number of jobs",
-    ),
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-) -> Response:
-    job_service = uws_factory.create_job_service()
-    jobs = await job_service.list_jobs(
-        user, phases=phase, after=after, count=last
-    )
-    base_url = request.url_for("get_job_list")
-    templates = uws_factory.create_templates()
-    return templates.job_list(request, jobs, base_url)
+def add_uws_routes(
+    router: APIRouter,
+    *,
+    sync_prefix: str,
+    async_prefix: str,
+    job_model: type[Job],
+    job_create_model: type[T],
+) -> None:
+    """Add the UWS routes to an existing router.
 
+    The routes are defined this way instead of statically in their own router
+    because the return types for some routes are dynamically configurable and
+    this way should get all the types in the right place for OpenAPI
+    generation.
 
-@uws_router.get(
-    "/{job_id}",
-    responses={200: {"content": {"application/xml": {}}}},
-    summary="Job details",
-)
-async def get_job(
-    job_id: str,
-    request: Request,
-    wait: int = Query(
-        None,
-        title="Wait for status changes",
+    Parameters
+    ----------
+    router
+        Router to which to attach the routes.
+    sync_prefix
+        URL prefix under which to put sync routes.
+    async_prefix
+        URL prefix under which to put async routes.
+    job_model
+        Type for the job model.
+    job_create_model
+        Type for the model used to create a job.
+    """
+
+    @router.post(
+        sync_prefix,
         description=(
-            "Maximum number of seconds to wait or -1 to wait for as long as"
-            " the server permits"
+            "Synchronously request a cutout. This will wait for the cutout to"
+            " be completed and return the resulting image as a FITS file. (The"
+            " image will be returned via a redirect to a URL at the underlying"
+            " object store.)"
         ),
-    ),
-    phase: ExecutionPhase = Query(
-        None,
-        title="Initial phase for waiting",
-        description=(
-            "When waiting for status changes, consider this to be the initial"
-            " execution phase. If the phase has already changed, return"
-            " immediately. This parameter should always be provided when"
-            " wait is used."
-        ),
-    ),
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-) -> Response:
-    job_service = uws_factory.create_job_service()
-    job = await job_service.get(user, job_id, wait=wait, wait_phase=phase)
-    templates = uws_factory.create_templates()
-    return await templates.job(request, job)
-
-
-@uws_router.delete(
-    "/{job_id}",
-    status_code=303,
-    response_class=RedirectResponse,
-    summary="Delete a job",
-)
-async def delete_job(
-    job_id: str,
-    request: Request,
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-    logger: BoundLogger = Depends(auth_logger_dependency),
-) -> str:
-    job_service = uws_factory.create_job_service()
-    await job_service.delete(user, job_id)
-    logger.info("Deleted job", job_id=job_id)
-    return request.url_for("get_job_list")
-
-
-@uws_router.post(
-    "/{job_id}",
-    description=(
-        "Alternate job deletion mechanism for clients that cannot use DELETE."
-    ),
-    response_class=RedirectResponse,
-    status_code=303,
-    summary="Delete a job",
-)
-async def delete_job_via_post(
-    job_id: str,
-    request: Request,
-    action: Optional[Literal["DELETE"]] = Form(
-        None,
-        title="Action to perform",
-        description="Mandatory, must be set to DELETE",
-    ),
-    params: list[JobParameter] = Depends(uws_post_params_dependency),
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-    logger: BoundLogger = Depends(auth_logger_dependency),
-) -> str:
-    # Work around the obnoxious requirement for case-insensitive parameters,
-    # which is also why the action parameter is declared as optional (but is
-    # listed to help with API documentation generation).
-    saw_delete = False
-    for param in params:
-        if param.parameter_id != "action" or param.value != "DELETE":
-            msg = f"Unknown parameter {param.parameter_id}={param.value}"
-            raise ParameterError(msg)
-        if param.parameter_id == "action" and param.value == "DELETE":
-            saw_delete = True
-    if not saw_delete:
-        raise ParameterError("No action given")
-
-    # Do the actual deletion.
-    job_service = uws_factory.create_job_service()
-    await job_service.delete(user, job_id)
-    logger.info("Deleted job", job_id=job_id)
-    return request.url_for("get_job_list")
-
-
-@uws_router.get(
-    "/{job_id}/destruction",
-    response_class=PlainTextResponse,
-    summary="Destruction time for job",
-)
-async def get_job_destruction(
-    job_id: str,
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-) -> str:
-    job_service = uws_factory.create_job_service()
-    job = await job_service.get(user, job_id)
-    return isodatetime(job.destruction_time)
-
-
-@uws_router.post(
-    "/{job_id}/destruction",
-    response_class=RedirectResponse,
-    status_code=303,
-    summary="Change job destruction time",
-)
-async def post_job_destruction(
-    job_id: str,
-    request: Request,
-    destruction: Optional[datetime] = Form(
-        None,
-        title="New destruction time",
-        description="Must be in ISO 8601 format.",
-        example="2021-09-10T10:01:02Z",
-    ),
-    params: list[JobParameter] = Depends(uws_post_params_dependency),
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-    logger: BoundLogger = Depends(auth_logger_dependency),
-) -> str:
-    # Work around the obnoxious requirement for case-insensitive parameters.
-    for param in params:
-        if param.parameter_id != "destruction":
-            msg = f"Unknown parameter {param.parameter_id}={param.value}"
-            raise ParameterError(msg)
-        destruction = parse_isodatetime(param.value)
-        if destruction is None:
-            raise ParameterError(f"Invalid date {param.value}")
-    if not destruction:
-        raise ParameterError("No new destruction time given")
-
-    # Update the destruction time.  Note that the policy layer may modify the
-    # destruction time, so the time set may not match the input.
-    # update_destruction returns the actual time set, or None if the time was
-    # not changed.
-    job_service = uws_factory.create_job_service()
-    new_destruction = await job_service.update_destruction(
-        user, job_id, destruction
+        response_class=RedirectResponse,
+        responses={
+            303: {"description": "Redirect to result of successful cutout"},
+            400: {
+                "description": "Cutout job failed",
+                "content": {"text/plain": {}},
+            },
+        },
+        status_code=303,
+        summary="Synchronous cutout",
     )
-    if new_destruction:
-        logger.info(
-            "Changed job destruction time",
-            job_id=job_id,
-            destruction=isodatetime(new_destruction),
+    async def post_sync(
+        create: T,
+        request: Request,
+        user: str = Depends(auth_dependency),
+        uws_factory: UWSFactory = Depends(uws_dependency),
+        logger: BoundLogger = Depends(auth_logger_dependency),
+    ) -> str:
+        if create.run_id:
+            logger = logger.bind(run_id=create.run_id)
+        job_service = uws_factory.create_job_service()
+        job = await job_service.create(
+            user, create.parameters, run_id=create.run_id
         )
-    return request.url_for("get_job", job_id=job_id)
+        logger.info(
+            "Created job", job_id=job.job_id, params=create.parameters.dict()
+        )
+        await job_service.start(user, job.job_id)
+        logger.info("Started job", job_id=job.job_id)
+        return await job_service.get_first_result(user, job.job_id)
 
+    @router.get(
+        async_prefix,
+        description=(
+            "List all existing jobs for the current user. Jobs will be sorted"
+            " by creation date, with the most recently created listed first."
+        ),
+        response_model=list[JobDescription],
+        response_model_exclude_none=True,
+        summary="Async job list",
+    )
+    async def get_job_list(
+        request: Request,
+        phase: Optional[list[ExecutionPhase]] = Query(
+            None,
+            title="Execution phase",
+            description="Limit results to the provided execution phases",
+        ),
+        after: Optional[datetime] = Query(
+            None,
+            title="Creation date",
+            description="Limit results to jobs created after this date",
+        ),
+        last: Optional[int] = Query(
+            None,
+            title="Number of jobs",
+            description="Return at most the given number of jobs",
+        ),
+        user: str = Depends(auth_dependency),
+        uws_factory: UWSFactory = Depends(uws_dependency),
+    ) -> list[JobDescription]:
+        job_service = uws_factory.create_job_service()
+        return await job_service.list_jobs(
+            user, phases=phase, after=after, count=last
+        )
 
-@uws_router.get(
-    "/{job_id}/error",
-    responses={
-        200: {"content": {"application/xml": {}}},
-        404: {"description": "Job not found or job did not fail"},
-    },
-    summary="Job error",
-)
-async def get_job_error(
-    job_id: str,
-    request: Request,
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-) -> Response:
-    job_service = uws_factory.create_job_service()
-    job = await job_service.get(user, job_id)
-    if not job.error:
-        raise DataMissingError(f"Job {job_id} did not fail")
-    templates = uws_factory.create_templates()
-    return templates.error(request, job.error)
+    @router.post(
+        async_prefix,
+        response_class=RedirectResponse,
+        status_code=303,
+        summary="Create async job",
+    )
+    async def create_job(
+        request: Request,
+        create: T,
+        user: str = Depends(auth_dependency),
+        uws_factory: UWSFactory = Depends(uws_dependency),
+        logger: BoundLogger = Depends(auth_logger_dependency),
+    ) -> str:
+        if create.run_id:
+            logger = logger.bind(run_id=create.run_id)
+        job_service = uws_factory.create_job_service()
+        job = await job_service.create(
+            user, create.parameters, run_id=create.run_id
+        )
+        logger.info(
+            "Created job", job_id=job.job_id, params=create.parameters.dict()
+        )
+        if create.start:
+            await job_service.start(user, job.job_id)
+            logger.info("Started job", job_id=job.job_id)
+        return request.url_for("get_job", job_id=job.job_id)
 
-
-@uws_router.get(
-    "/{job_id}/executionduration",
-    response_class=PlainTextResponse,
-    summary="Execution duration of job",
-)
-async def get_job_execution_duration(
-    job_id: str,
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-) -> str:
-    job_service = uws_factory.create_job_service()
-    job = await job_service.get(user, job_id)
-    return str(job.execution_duration)
-
-
-@uws_router.post(
-    "/{job_id}/executionduration",
-    response_class=RedirectResponse,
-    status_code=303,
-    summary="Change job execution duration",
-)
-async def post_job_execution_duration(
-    job_id: str,
-    request: Request,
-    executionduration: Optional[int] = Form(
-        None,
-        title="New execution duration",
-        description="Integer seconds of wall clock time.",
-        example=14400,
-    ),
-    params: list[JobParameter] = Depends(uws_post_params_dependency),
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-    logger: BoundLogger = Depends(auth_logger_dependency),
-) -> str:
-    # Work around the obnoxious requirement for case-insensitive parameters.
-    for param in params:
-        if param.parameter_id != "executionduration":
-            msg = f"Unknown parameter {param.parameter_id}={param.value}"
-            raise ParameterError(msg)
+    @router.get(
+        async_prefix + "/{job_id}",
+        response_model=job_model,
+        response_model_exclude={"message_id"},
+        response_model_exclude_none=True,
+        summary="Job details",
+    )
+    async def get_job(
+        job_id: str,
+        request: Request,
+        wait: int = Query(
+            None,
+            title="Wait for status changes",
+            description=(
+                "Maximum number of seconds to wait or -1 to wait for as long"
+                " as the server permits"
+            ),
+        ),
+        phase: ExecutionPhase = Query(
+            None,
+            title="Initial phase for waiting",
+            description=(
+                "When waiting for status changes, consider this to be the"
+                " initial execution phase. If the phase has already changed,"
+                " return immediately. This parameter should always be provided"
+                " when wait is used."
+            ),
+        ),
+        user: str = Depends(auth_dependency),
+        uws_factory: UWSFactory = Depends(uws_dependency),
+        logger: BoundLogger = Depends(auth_logger_dependency),
+    ) -> Job:
+        job_service = uws_factory.create_job_service()
         try:
-            executionduration = int(param.value)
-        except Exception:
-            raise ParameterError(f"Invalid duration {param.value}")
-        if executionduration <= 0:
-            raise ParameterError(f"Invalid duration {param.value}")
-    if not executionduration:
-        raise ParameterError("No new execution duration given")
+            return await job_service.get(
+                user, job_id, wait=wait, wait_phase=phase
+            )
+        except PermissionDeniedError as e:
+            e.location = ErrorLocation.path
+            e.field = "job_id"
+            raise
 
-    # Update the execution duration.  Note that the policy layer may modify
-    # the execution duration, so the duration set may not match the input.
-    # update_execution_duration returns the new execution duration set, or
-    # None if it was not changed.
-    job_service = uws_factory.create_job_service()
-    new_executionduration = await job_service.update_execution_duration(
-        user, job_id, executionduration
+    @router.delete(
+        async_prefix + "/{job_id}",
+        status_code=204,
+        summary="Delete a job",
     )
-    if new_executionduration is not None:
-        logger.info(
-            "Changed job execution duration",
-            job_id=job_id,
-            duration=f"{new_executionduration}s",
-        )
-    return request.url_for("get_job", job_id=job_id)
+    async def delete_job(
+        job_id: str,
+        user: str = Depends(auth_dependency),
+        uws_factory: UWSFactory = Depends(uws_dependency),
+        logger: BoundLogger = Depends(auth_logger_dependency),
+    ) -> None:
+        job_service = uws_factory.create_job_service()
+        try:
+            await job_service.delete(user, job_id)
+        except PermissionDeniedError as e:
+            e.location = ErrorLocation.path
+            e.field = "job_id"
+            raise
+        logger.info("Deleted job", job_id=job_id)
 
+    @router.patch(
+        async_prefix + "/{job_id}",
+        status_code=200,
+        response_model=job_model,
+        response_model_exclude={"message_id"},
+        response_model_exclude_none=True,
+        summary="Update a job",
+    )
+    async def patch_job(
+        job_id: str,
+        update: JobUpdate,
+        user: str = Depends(auth_dependency),
+        uws_factory: UWSFactory = Depends(uws_dependency),
+        logger: BoundLogger = Depends(auth_logger_dependency),
+    ) -> Job:
+        job_service = uws_factory.create_job_service()
+        try:
+            await job_service.update(user, job_id, update)
+        except PermissionDeniedError as e:
+            e.location = ErrorLocation.path
+            e.field = "job_id"
+            raise
+        return await job_service.get(user, job_id)
 
-@uws_router.get(
-    "/{job_id}/owner",
-    response_class=PlainTextResponse,
-    summary="Owner of job",
-)
-async def get_job_owner(
-    job_id: str,
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-) -> str:
-    job_service = uws_factory.create_job_service()
-    job = await job_service.get(user, job_id)
-    return job.owner
+    @router.post(
+        async_prefix + "/{job_id}/start",
+        response_class=RedirectResponse,
+        status_code=303,
+        summary="Start a job",
+    )
+    async def job_start(
+        job_id: str,
+        start: JobStart,
+        request: Request,
+        user: str = Depends(auth_dependency),
+        uws_factory: UWSFactory = Depends(uws_dependency),
+        logger: BoundLogger = Depends(auth_logger_dependency),
+    ) -> str:
+        job_service = uws_factory.create_job_service()
+        try:
+            await job_service.start(user, job_id)
+        except PermissionDeniedError as e:
+            e.location = ErrorLocation.path
+            e.field = "job_id"
+            raise
+        logger.info("Started job", job_id=job_id)
+        return request.url_for("get_job", job_id=job_id)
 
-
-@uws_router.get(
-    "/{job_id}/parameters",
-    responses={200: {"content": {"application/xml": {}}}},
-    summary="Job parameters",
-)
-async def get_job_parameters(
-    job_id: str,
-    request: Request,
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-) -> Response:
-    job_service = uws_factory.create_job_service()
-    job = await job_service.get(user, job_id)
-    templates = uws_factory.create_templates()
-    return templates.parameters(request, job)
-
-
-@uws_router.get(
-    "/{job_id}/phase",
-    response_class=PlainTextResponse,
-    summary="Phase of job",
-)
-async def get_job_phase(
-    job_id: str,
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-) -> str:
-    job_service = uws_factory.create_job_service()
-    job = await job_service.get(user, job_id)
-    return job.phase.value
-
-
-@uws_router.post(
-    "/{job_id}/phase",
-    response_class=RedirectResponse,
-    status_code=303,
-    summary="Start or abort job",
-)
-async def post_job_phase(
-    job_id: str,
-    request: Request,
-    phase: Optional[Literal["RUN", "ABORT"]] = Form(
-        None,
-        title="Job state change",
-        summary="RUN to start the job, ABORT to abort the job.",
-    ),
-    params: list[JobParameter] = Depends(uws_post_params_dependency),
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-    logger: BoundLogger = Depends(auth_logger_dependency),
-) -> str:
-    # Work around the obnoxious requirement for case-insensitive parameters.
-    for param in params:
-        if param.parameter_id != "phase":
-            msg = f"Unknown parameter {param.parameter_id}={param.value}"
-            raise ParameterError(msg)
-        if param.value not in ("RUN", "ABORT"):
-            raise ParameterError(f"Invalid phase {param.value}")
-        phase = param.value  # type: ignore[assignment]
-    if not phase:
-        raise ParameterError("No new phase given")
-
-    # Dramatiq doesn't support aborting jobs, so currently neither do we.
-    if phase == "ABORT":
-        raise PermissionDeniedError("Aborting jobs is not supported")
-
-    # The only remaining case is starting the job.
-    job_service = uws_factory.create_job_service()
-    await job_service.start(user, job_id)
-    logger.info("Started job", job_id=job_id)
-    return request.url_for("get_job", job_id=job_id)
-
-
-@uws_router.get(
-    "/{job_id}/quote",
-    response_class=PlainTextResponse,
-    summary="Quote for job",
-)
-async def get_job_quote(
-    job_id: str,
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-) -> str:
-    job_service = uws_factory.create_job_service()
-    job = await job_service.get(user, job_id)
-    if job.quote:
-        return isodatetime(job.quote)
-    else:
-        # The UWS standard says to return an empty text/plain response in this
-        # case, as weird as it might look.
-        return ""
-
-
-@uws_router.get(
-    "/{job_id}/results",
-    responses={200: {"content": {"application/xml": {}}}},
-    summary="Job results",
-)
-async def get_job_results(
-    job_id: str,
-    request: Request,
-    user: str = Depends(auth_dependency),
-    uws_factory: UWSFactory = Depends(uws_dependency),
-) -> Response:
-    job_service = uws_factory.create_job_service()
-    job = await job_service.get(user, job_id)
-    templates = uws_factory.create_templates()
-    return await templates.results(request, job)
+    # This is deep magic to work around a Pydantic limitation.  Pydantic can't
+    # handle TypeVar parameters to routes and instead treats them as
+    # equivalent to their bound, which in this case means that it thinks the
+    # parameters element of JobCreate is a BaseModel, and thus serializes it
+    # to the empty dict.  Work around this by dynamically fixing the type
+    # annotation to match the actual job creation model.  This may require
+    # changes if type annotations are modified in future versions of Python.
+    post_sync.__annotations__["create"] = job_create_model
+    create_job.__annotations__["create"] = job_create_model

@@ -19,7 +19,7 @@ import pytest_asyncio
 import structlog
 from asgi_lifespan import LifespanManager
 from dramatiq import Broker
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from httpx import AsyncClient
 from safir.database import create_database_engine, initialize_database
 from safir.dependencies.db_session import db_session_dependency
@@ -33,10 +33,13 @@ from structlog.stdlib import BoundLogger
 from vocutouts.uws.config import UWSConfig
 from vocutouts.uws.dependencies import UWSFactory, uws_dependency
 from vocutouts.uws.errors import install_error_handlers
-from vocutouts.uws.handlers import uws_router
+from vocutouts.uws.handlers import add_uws_routes
 from vocutouts.uws.schema import Base
 
 from ..support.uws import (
+    TrivialJob,
+    TrivialJobCreate,
+    TrivialParameters,
     TrivialPolicy,
     WorkerSession,
     build_uws_config,
@@ -63,17 +66,26 @@ async def app(
     await initialize_database(engine, logger, schema=Base.metadata, reset=True)
     await engine.dispose()
     uws_app = FastAPI()
-    uws_app.include_router(uws_router, prefix="/jobs")
+    uws_app.add_middleware(CaseInsensitiveQueryMiddleware)
+    uws_app.add_middleware(XForwardedMiddleware)
+    install_error_handlers(uws_app)
+    router = APIRouter()
+    add_uws_routes(
+        router,
+        sync_prefix="/sync",
+        async_prefix="/jobs",
+        job_model=TrivialJob,
+        job_create_model=TrivialJobCreate,
+    )
+    uws_app.include_router(router)
     uws_broker.add_middleware(WorkerSession(uws_config))
 
     @uws_app.on_event("startup")
     async def startup_event() -> None:
-        install_error_handlers(uws_app)
-        uws_app.add_middleware(CaseInsensitiveQueryMiddleware)
-        uws_app.add_middleware(XForwardedMiddleware)
         await uws_dependency.initialize(
             config=uws_config,
             policy=TrivialPolicy(trivial_job),
+            param_type=TrivialParameters,
             logger=logger,
         )
 

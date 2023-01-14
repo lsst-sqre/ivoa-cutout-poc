@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import re
+from typing import Any
+from unittest.mock import ANY
 
 import pytest
 from dramatiq import Worker
@@ -12,62 +13,24 @@ from httpx import AsyncClient
 
 from vocutouts.broker import broker
 
-PENDING_JOB = """
-<uws:job
-    version="1.1"
-    xsi:schemaLocation="http://www.ivoa.net/xml/UWS/v1.0 UWS.xsd"
-    xmlns:xml="http://www.w3.org/XML/1998/namespace"
-    xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"
-    xmlns:xlink="http://www.w3.org/1999/xlink"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <uws:jobId>1</uws:jobId>
-  <uws:ownerId>someone</uws:ownerId>
-  <uws:phase>PENDING</uws:phase>
-  <uws:creationTime>[DATE]</uws:creationTime>
-  <uws:executionDuration>600</uws:executionDuration>
-  <uws:destruction>[DATE]</uws:destruction>
-  <uws:parameters>
-    <uws:parameter id="id" isPost="true">1:2:band:value</uws:parameter>
-    <uws:parameter id="pos" isPost="true">CIRCLE 0 1 2</uws:parameter>
-  </uws:parameters>
-</uws:job>
-"""
-
-COMPLETED_JOB = """
-<uws:job
-    version="1.1"
-    xsi:schemaLocation="http://www.ivoa.net/xml/UWS/v1.0 UWS.xsd"
-    xmlns:xml="http://www.w3.org/XML/1998/namespace"
-    xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"
-    xmlns:xlink="http://www.w3.org/1999/xlink"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <uws:jobId>2</uws:jobId>
-  <uws:runId>some-run-id</uws:runId>
-  <uws:ownerId>someone</uws:ownerId>
-  <uws:phase>COMPLETED</uws:phase>
-  <uws:creationTime>[DATE]</uws:creationTime>
-  <uws:startTime>[DATE]</uws:startTime>
-  <uws:endTime>[DATE]</uws:endTime>
-  <uws:executionDuration>600</uws:executionDuration>
-  <uws:destruction>[DATE]</uws:destruction>
-  <uws:parameters>
-    <uws:parameter id="id" isPost="true">1:2:band:value</uws:parameter>
-    <uws:parameter id="pos" isPost="true">CIRCLE 0.5 0.8 2</uws:parameter>
-  </uws:parameters>
-  <uws:results>
-    <uws:result id="cutout" xlink:href="https://example.com/some/path"\
- mime-type="application/fits"/>
-  </uws:results>
-</uws:job>
-"""
-
 
 @pytest.mark.asyncio
 async def test_create_job(client: AsyncClient) -> None:
     r = await client.post(
         "/api/cutout/jobs",
         headers={"X-Auth-Request-User": "someone"},
-        data={"ID": "1:2:band:value", "Pos": "CIRCLE 0 1 2"},
+        json={
+            "parameters": {
+                "ids": ["1:2:band:value"],
+                "stencils": [
+                    {
+                        "type": "circle",
+                        "center": {"ra": 0, "dec": 1},
+                        "radius": 2,
+                    }
+                ],
+            }
+        },
     )
     assert r.status_code == 303
     assert r.headers["Location"] == "https://example.com/api/cutout/jobs/1"
@@ -75,8 +38,24 @@ async def test_create_job(client: AsyncClient) -> None:
         "/api/cutout/jobs/1", headers={"X-Auth-Request-User": "someone"}
     )
     assert r.status_code == 200
-    result = re.sub(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", "[DATE]", r.text)
-    assert result == PENDING_JOB.strip()
+    assert r.json() == {
+        "job_id": "1",
+        "owner": "someone",
+        "phase": "pending",
+        "creation_time": ANY,
+        "execution_duration": 600,
+        "destruction_time": ANY,
+        "parameters": {
+            "ids": ["1:2:band:value"],
+            "stencils": [
+                {
+                    "type": "circle",
+                    "center": {"ra": 0.0, "dec": 1.0},
+                    "radius": 2.0,
+                }
+            ],
+        },
+    }
 
     # Start a worker.
     worker = Worker(broker, worker_timeout=100)
@@ -87,43 +66,79 @@ async def test_create_job(client: AsyncClient) -> None:
         r = await client.post(
             "/api/cutout/jobs",
             headers={"X-Auth-Request-User": "someone"},
-            data={
-                "ID": "1:2:band:value",
-                "pos": "CIRCLE 0.5 0.8 2",
-                "runid": "some-run-id",
+            json={
+                "parameters": {
+                    "ids": ["1:2:band:value"],
+                    "stencils": [
+                        {
+                            "type": "circle",
+                            "center": {"ra": 0, "dec": 1},
+                            "radius": 2,
+                        }
+                    ],
+                },
+                "start": True,
+                "run_id": "some-run-id",
             },
-            params={"phase": "RUN"},
         )
         assert r.status_code == 303
         assert r.headers["Location"] == "https://example.com/api/cutout/jobs/2"
         r = await client.get(
             "/api/cutout/jobs/2",
             headers={"X-Auth-Request-User": "someone"},
-            params={"wait": 2, "phase": "QUEUED"},
+            params={"wait": 2, "phase": "queued"},
         )
         assert r.status_code == 200
-        if "EXECUTING" in r.text:
+        if r.json()["phase"] == "executing":
             r = await client.get(
                 "/api/cutout/jobs/2",
                 headers={"X-Auth-Request-User": "someone"},
-                params={"wait": 10, "phase": "EXECUTING"},
+                params={"wait": 10, "phase": "executing"},
             )
             assert r.status_code == 200
 
         # Depending on sequencing, it's possible that the start time of the
         # job has not yet been recorded.  If that is the case, wait a bit for
         # that to happen and then request the job again.
-        if "startTime" not in r.text:
+        job = r.json()
+        if not job.get("start_time"):
             await asyncio.sleep(2.0)
             r = await client.get(
                 "/api/cutout/jobs/2",
                 headers={"X-Auth-Request-User": "someone"},
-                params={"wait": 10, "phase": "EXECUTING"},
+                params={"wait": 10, "phase": "executing"},
             )
             assert r.status_code == 200
+            job = r.json()
 
-        result = re.sub(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", "[DATE]", r.text)
-        assert result == COMPLETED_JOB.strip()
+        assert job == {
+            "job_id": "2",
+            "run_id": "some-run-id",
+            "owner": "someone",
+            "phase": "completed",
+            "creation_time": ANY,
+            "start_time": ANY,
+            "end_time": ANY,
+            "execution_duration": 600,
+            "destruction_time": ANY,
+            "parameters": {
+                "ids": ["1:2:band:value"],
+                "stencils": [
+                    {
+                        "type": "circle",
+                        "center": {"ra": 0.0, "dec": 1.0},
+                        "radius": 2.0,
+                    }
+                ],
+            },
+            "results": [
+                {
+                    "result_id": "cutout",
+                    "url": "https://example.com/some/path",
+                    "mime_type": "application/fits",
+                }
+            ],
+        }
     finally:
         worker.stop()
 
@@ -141,40 +156,95 @@ async def test_redirect(app: FastAPI) -> None:
         r = await client.post(
             "/api/cutout/jobs",
             headers={
-                "Host": "example.com",
+                "Host": "example.org",
                 "X-Forwarded-For": "10.10.10.10",
-                "X-Forwarded-Host": "example.com",
+                "X-Forwarded-Host": "example.org",
                 "X-Forwarded-Proto": "https",
                 "X-Auth-Request-User": "someone",
             },
-            data={"ID": "1:2:band:value", "Pos": "CIRCLE 0 1 2"},
+            json={
+                "parameters": {
+                    "ids": ["1:2:band:value"],
+                    "stencils": [
+                        {
+                            "type": "circle",
+                            "center": {"ra": 0, "dec": 1},
+                            "radius": 2,
+                        }
+                    ],
+                }
+            },
         )
     assert r.status_code == 303
-    assert r.headers["Location"] == "https://example.com/api/cutout/jobs/1"
+    assert r.headers["Location"] == "https://example.org/api/cutout/jobs/1"
 
 
 @pytest.mark.asyncio
 async def test_bad_parameters(client: AsyncClient) -> None:
-    bad_params: list[dict[str, str]] = [
+    bad_stencils: list[dict[str, Any]] = [
         {},
-        {"pos": "RANGE 0 360 -2 2"},
-        {"id": "foo", "foo": "bar"},
-        {"id": "foo", "pos": "RANGE 0 360"},
-        {"id": "foo", "pos": "POLYHEDRON 10"},
-        {"id": "foo", "pos": "CIRCLE 1 1"},
-        {"id": "foo", "pos": "POLYGON 1 1"},
-        {"id": "foo", "circle": "1 1 1", "pos": "RANGE 0 360 1"},
-        {"id": "foo", "circle": "1"},
-        {"id": "foo", "polygon": "1 2 3"},
-        {"id": "foo", "circle": "1 1 1", "phase": "STOP"},
-        {"id": "foo", "circle": "1 1 1", "PHASE": "STOP"},
-        {"ID": "some-id", "pos": "RANGE 1 1 2 2", "phase": "RUN"},
+        {"type": "pos", "center": {"ra": 0, "dec": 0}, "radius": 1},
+        {
+            "type": "range",
+            "ra": {"min": 0, "max": 360},
+            "dec": {"min": -2, "max": 2},
+        },
+        {"type": "polygon", "vertices": [{"ra": 1, "dec": 2}]},
+        {
+            "type": "polygon",
+            "vertices": [{"ra": 1, "dec": 2}, {"ra": 2, "dec": 3}],
+        },
     ]
-    for params in bad_params:
+    for stencil in bad_stencils:
         r = await client.post(
             "/api/cutout/jobs",
             headers={"X-Auth-Request-User": "user"},
-            data=params,
+            json={
+                "ids": ["1:2:band:value"],
+                "stencils": [stencil],
+            },
         )
-        assert r.status_code == 422, f"Parameters {params}"
-        assert r.text.startswith("UsageError")
+        assert r.status_code == 422, f"Stencil {stencil}"
+
+    # Multiple ids with valid stencils aren't allowed.
+    r = await client.post(
+        "/api/cutout/jobs",
+        headers={"X-Auth-Request-User": "someone"},
+        json={
+            "parameters": {
+                "ids": ["1:2:band:value", "2:3:band:value"],
+                "stencils": [
+                    {
+                        "type": "circle",
+                        "center": {"ra": 0, "dec": 1},
+                        "radius": 2,
+                    }
+                ],
+            }
+        },
+    )
+    assert r.status_code == 422
+
+    # Multiple stencils aren't allowed.
+    r = await client.post(
+        "/api/cutout/jobs",
+        headers={"X-Auth-Request-User": "someone"},
+        json={
+            "parameters": {
+                "ids": ["1:2:band:value"],
+                "stencils": [
+                    {
+                        "type": "circle",
+                        "center": {"ra": 0, "dec": 1},
+                        "radius": 2,
+                    },
+                    {
+                        "type": "circle",
+                        "center": {"ra": 1, "dec": 1},
+                        "radius": 1,
+                    },
+                ],
+            }
+        },
+    )
+    assert r.status_code == 422

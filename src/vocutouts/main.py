@@ -20,6 +20,7 @@ from .actors import cutout
 from .config import config
 from .handlers.external import external_router
 from .handlers.internal import internal_router
+from .models.parameters import CutoutParameters
 from .policy import ImageCutoutPolicy
 from .uws.dependencies import uws_dependency
 from .uws.errors import install_error_handlers
@@ -65,6 +66,7 @@ async def startup_event() -> None:
     await uws_dependency.initialize(
         config=config.uws_config(),
         policy=ImageCutoutPolicy(cutout, logger),
+        param_type=CutoutParameters,
         logger=logger,
     )
 

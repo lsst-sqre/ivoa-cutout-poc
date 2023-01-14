@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import sys
+from pathlib import Path
+from typing import Optional
+
 import click
 import structlog
 import uvicorn
+from fastapi.openapi.utils import get_openapi
 from safir.asyncio import run_with_asyncio
 from safir.database import create_database_engine, initialize_database
 
 from .config import config
+from .main import app
 from .uws.schema import Base
 
 
@@ -66,3 +73,27 @@ async def init(reset: bool) -> None:
         engine, logger, schema=Base.metadata, reset=reset
     )
     await engine.dispose()
+
+
+@main.command()
+@click.option(
+    "--output",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Output path (output to stdout if not given).",
+)
+def openapi_schema(output: Optional[Path]) -> None:
+    """Generate the OpenAPI schema."""
+    description = app.description
+    schema = get_openapi(
+        title=app.title,
+        description=description,
+        version=app.version,
+        routes=app.routes,
+    )
+    if output:
+        output.parent.mkdir(exist_ok=True)
+        with output.open("w") as f:
+            json.dump(schema, f)
+    else:
+        json.dump(schema, sys.stdout)

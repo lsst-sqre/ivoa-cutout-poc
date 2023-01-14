@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-from typing import Any, Optional, TypeVar, cast
+from typing import Any, Generic, Optional, TypeVar, cast
 
+from pydantic import BaseModel
 from safir.database import datetime_from_db, datetime_to_db
 from sqlalchemy import delete
 from sqlalchemy.exc import DBAPIError, OperationalError
@@ -21,38 +22,40 @@ from .models import (
     Job,
     JobDescription,
     JobError,
-    JobParameter,
     JobResult,
 )
 from .schema.job import Job as SQLJob
-from .schema.job_parameter import JobParameter as SQLJobParameter
 from .schema.job_result import JobResult as SQLJobResult
 
+T = TypeVar("T", bound=BaseModel)
 F = TypeVar("F", bound=Callable[..., Any])
 G = TypeVar("G", bound=Callable[..., Awaitable[Any]])
 
 __all__ = ["FrontendJobStore", "WorkerJobStore"]
 
 
-def _convert_job(job: SQLJob) -> Job:
-    """Convert the SQL representation of a job to its dataclass.
+def _convert_job(job: SQLJob, param_type: type[T]) -> Job[T]:
+    """Convert the SQL representation of a job to its model.
 
-    The internal representation of a job uses a dataclass that is kept
-    intentionally separate from the database schema so that the conversion
-    can be done explicitly and the rest of the code kept separate from
-    SQLAlchemy database models.  This internal helper function converts
-    from the database representation to the internal representation.
+    The internal representation of a job uses a model that is kept
+    intentionally separate from the database schema so that the conversion can
+    be done explicitly and the rest of the code kept separate from SQLAlchemy
+    database models.  This internal helper function converts from the database
+    representation to the internal representation.
     """
     error = None
-    if job.error_code and job.error_type and job.error_message:
+    if job.error_code and job.error_message:
         error = JobError(
-            error_type=job.error_type,
             error_code=job.error_code,
             message=job.error_message,
             detail=job.error_detail,
         )
-    return Job(
-        job_id=str(job.id),
+    results = [
+        JobResult.from_orm(r)
+        for r in sorted(job.results, key=lambda r: r.sequence)
+    ]
+    return Job[T](
+        job_id=str(job.job_id),
         message_id=job.message_id,
         owner=job.owner,
         phase=job.phase,
@@ -63,21 +66,8 @@ def _convert_job(job: SQLJob) -> Job:
         destruction_time=datetime_from_db(job.destruction_time),
         execution_duration=job.execution_duration,
         quote=job.quote,
-        parameters=[
-            JobParameter(
-                parameter_id=p.parameter, value=p.value, is_post=p.is_post
-            )
-            for p in sorted(job.parameters, key=lambda p: p.id)
-        ],
-        results=[
-            JobResult(
-                result_id=r.result_id,
-                url=r.url,
-                size=r.size,
-                mime_type=r.mime_type,
-            )
-            for r in sorted(job.results, key=lambda r: r.sequence)
-        ],
+        parameters=param_type.parse_raw(job.parameters),
+        results=results if results else None,
         error=error,
     )
 
@@ -117,7 +107,7 @@ def retry_async_transaction(g: G) -> G:
     return cast(G, wrapper)
 
 
-class FrontendJobStore:
+class FrontendJobStore(Generic[T]):
     """Stores and manipulates jobs in the database for the frontend.
 
     This is the async storage layer used by the web service frontend.  Workers
@@ -127,6 +117,8 @@ class FrontendJobStore:
     ----------
     session
         The underlying database session.
+    param_type
+        The type of the job parameters.
 
     Notes
     -----
@@ -152,18 +144,21 @@ class FrontendJobStore:
     to datetimes when retrieved from the database.
     """
 
-    def __init__(self, session: async_scoped_session) -> None:
+    def __init__(
+        self, session: async_scoped_session, param_type: type[T]
+    ) -> None:
         self._session = session
+        self._param_type = param_type
 
     async def add(
         self,
         *,
         owner: str,
         run_id: Optional[str] = None,
-        params: list[JobParameter],
+        params: T,
         execution_duration: int,
         lifetime: int,
-    ) -> Job:
+    ) -> Job[T]:
         """Create a record of a new job.
 
         The job will be created in pending status.
@@ -190,14 +185,6 @@ class FrontendJobStore:
         """
         now = datetime.now(tz=timezone.utc).replace(microsecond=0)
         destruction_time = now + timedelta(seconds=lifetime)
-        sql_params = [
-            SQLJobParameter(
-                parameter=p.parameter_id,
-                value=p.value,
-                is_post=p.is_post,
-            )
-            for p in params
-        ]
         job = SQLJob(
             owner=owner,
             phase=ExecutionPhase.PENDING,
@@ -205,19 +192,19 @@ class FrontendJobStore:
             creation_time=datetime_to_db(now),
             destruction_time=datetime_to_db(destruction_time),
             execution_duration=execution_duration,
-            parameters=sql_params,
+            parameters=params.json(),
             results=[],
         )
         async with self._session.begin():
-            self._session.add_all([job, *sql_params])
+            self._session.add(job)
             await self._session.flush()
-            return _convert_job(job)
+            return _convert_job(job, self._param_type)
 
     async def availability(self) -> Availability:
         """Check that the database is up."""
         try:
             async with self._session.begin():
-                await self._session.execute(select(SQLJob.id).limit(1))
+                await self._session.execute(select(SQLJob.job_id).limit(1))
             return Availability(available=True)
         except OperationalError:
             note = "cannot query UWS job database"
@@ -229,14 +216,14 @@ class FrontendJobStore:
     async def delete(self, job_id: str) -> None:
         """Delete a job by ID."""
         async with self._session.begin():
-            stmt = delete(SQLJob).where(SQLJob.id == int(job_id))
+            stmt = delete(SQLJob).where(SQLJob.job_id == int(job_id))
             await self._session.execute(stmt)
 
     async def get(self, job_id: str) -> Job:
         """Retrieve a job by ID."""
         async with self._session.begin():
             job = await self._get_job(job_id)
-            return _convert_job(job)
+            return _convert_job(job, self._param_type)
 
     async def list_jobs(
         self,
@@ -266,7 +253,7 @@ class FrontendJobStore:
             List of job descriptions matching the search criteria.
         """
         stmt = select(
-            SQLJob.id,
+            SQLJob.job_id,
             SQLJob.owner,
             SQLJob.phase,
             SQLJob.run_id,
@@ -281,16 +268,7 @@ class FrontendJobStore:
             stmt = stmt.limit(count)
         async with self._session.begin():
             jobs = await self._session.execute(stmt)
-            return [
-                JobDescription(
-                    job_id=str(j.id),
-                    owner=j.owner,
-                    phase=j.phase,
-                    run_id=j.run_id,
-                    creation_time=j.creation_time,
-                )
-                for j in jobs.all()
-            ]
+            return [JobDescription.from_orm(j) for j in jobs.all()]
 
     @retry_async_transaction
     async def mark_queued(self, job_id: str, message_id: str) -> None:
@@ -332,7 +310,7 @@ class FrontendJobStore:
             job.destruction_time = datetime_to_db(destruction)
 
     async def update_execution_duration(
-        self, job_id: str, execution_duration: int
+        self, job_id: str, execution_duration: timedelta
     ) -> None:
         """Update the destruction time of a job.
 
@@ -345,11 +323,11 @@ class FrontendJobStore:
         """
         async with self._session.begin():
             job = await self._get_job(job_id)
-            job.execution_duration = execution_duration
+            job.execution_duration = int(execution_duration.total_seconds())
 
     async def _get_job(self, job_id: str) -> SQLJob:
         """Retrieve a job from the database by job ID."""
-        stmt = select(SQLJob).where(SQLJob.id == int(job_id))
+        stmt = select(SQLJob).where(SQLJob.job_id == int(job_id))
         job = (await self._session.execute(stmt)).scalar_one_or_none()
         if not job:
             raise UnknownJobError(job_id)
@@ -407,7 +385,7 @@ class WorkerJobStore:
             job.end_time = datetime_to_db(datetime.now(tz=timezone.utc))
             for sequence, result in enumerate(results, start=1):
                 sql_result = SQLJobResult(
-                    job_id=job.id,
+                    job_id=job.job_id,
                     result_id=result.result_id,
                     sequence=sequence,
                     url=result.url,
@@ -423,7 +401,6 @@ class WorkerJobStore:
             job = self._get_job(job_id)
             job.phase = ExecutionPhase.ERROR
             job.end_time = datetime_to_db(datetime.now(tz=timezone.utc))
-            job.error_type = error.error_type
             job.error_code = error.error_code
             job.error_message = error.message
             job.error_detail = error.detail
@@ -453,7 +430,7 @@ class WorkerJobStore:
 
     def _get_job(self, job_id: str) -> SQLJob:
         """Retrieve a job from the database by job ID."""
-        stmt = select(SQLJob).where(SQLJob.id == int(job_id))
+        stmt = select(SQLJob).where(SQLJob.job_id == int(job_id))
         job = self._session.execute(stmt).scalar_one_or_none()
         if not job:
             raise UnknownJobError(job_id)

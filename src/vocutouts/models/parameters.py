@@ -1,61 +1,39 @@
-"""Representation of request parameters."""
+"""Representation of request parameters for cutouts."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from typing import Any
 
-from ..exceptions import InvalidCutoutParameterError
-from ..uws.models import JobParameter
-from .stencils import Stencil, parse_stencil
+from pydantic import BaseModel, Field, validator
+
+from ..uws.models import Job, JobCreate
+from .stencils import CircleStencil, PolygonStencil, RangeStencil
 
 
-@dataclass
-class CutoutParameters:
+class CutoutParameters(BaseModel):
     """The parameters to a cutout request."""
 
-    ids: list[str]
-    """The dataset IDs on which to operate."""
+    ids: list[str] = Field(..., title="Dataset IDs on which to operate")
 
-    stencils: list[Stencil]
-    """The cutout stencils to apply."""
+    stencils: list[CircleStencil | PolygonStencil | RangeStencil] = Field(
+        ..., title="The cutout stencils to apply"
+    )
 
-    @classmethod
-    def from_job_parameters(
-        cls, params: list[JobParameter]
-    ) -> CutoutParameters:
-        """Convert generic UWS parameters to the iamge cutout parameters.
+    @validator("ids", "stencils")
+    def _nonempty(cls, v: list[Any]) -> list[Any]:
+        """Ensure a list is non-empty."""
+        if len(v) < 1:
+            raise ValueError("list must be non-empty")
+        return v
 
-        Parameters
-        ----------
-        params
-            Generic input job parameters.
 
-        Returns
-        -------
-        CutoutParameters
-            The parsed cutout parameters specific to the image cutout service.
+class CutoutJob(Job):
+    """The corresponding job model."""
 
-        Raises
-        ------
-        vocutouts.exceptions.InvalidCutoutParameterError
-            One of the parameters could not be parsed.
-        """
-        ids = []
-        stencils = []
-        try:
-            for param in params:
-                if param.parameter_id == "id":
-                    ids.append(param.value)
-                else:
-                    f = parse_stencil(param.parameter_id.upper(), param.value)
-                    stencils.append(f)
-        except Exception as e:
-            msg = f"Invalid cutout parameter: {type(e).__name__}: {str(e)}"
-            raise InvalidCutoutParameterError(msg, params) from e
-        if not ids:
-            raise InvalidCutoutParameterError("No dataset ID given", params)
-        if not stencils:
-            raise InvalidCutoutParameterError(
-                "No cutout stencil given", params
-            )
-        return cls(ids=ids, stencils=stencils)
+    parameters: CutoutParameters = Field(..., title="Job parameters")
+
+
+class CutoutJobCreate(JobCreate):
+    """The corresponding job creation model."""
+
+    parameters: CutoutParameters = Field(..., title="Job parameters")

@@ -6,31 +6,30 @@ request to individual route handlers, which in turn can create other needed
 objects.
 """
 
-from typing import Optional
+from typing import Generic, Optional, TypeVar
 
-from fastapi import Depends, Request
+from fastapi import Depends
+from pydantic import BaseModel
 from safir.dependencies.db_session import db_session_dependency
 from safir.dependencies.logger import logger_dependency
 from sqlalchemy.ext.asyncio import async_scoped_session
 from structlog.stdlib import BoundLogger
 
 from .config import UWSConfig
-from .models import JobParameter
 from .policy import UWSPolicy
-from .responses import UWSTemplates
-from .results import ResultStore
 from .service import JobService
 from .storage import FrontendJobStore
+
+T = TypeVar("T", bound=BaseModel)
 
 __all__ = [
     "UWSDependency",
     "UWSFactory",
     "uws_dependency",
-    "uws_post_params_dependency",
 ]
 
 
-class UWSFactory:
+class UWSFactory(Generic[T]):
     """Build UWS components."""
 
     def __init__(
@@ -39,29 +38,24 @@ class UWSFactory:
         config: UWSConfig,
         policy: UWSPolicy,
         session: async_scoped_session,
-        result_store: ResultStore,
+        param_type: type[T],
         logger: BoundLogger,
     ) -> None:
         self._config = config
         self._policy = policy
         self._session = session
-        self._result_store = result_store
+        self._param_type = param_type
         self._logger = logger
 
-    def create_result_store(self) -> ResultStore:
-        """Return a wrapper around the result storage."""
-        return self._result_store
-
-    def create_job_service(self) -> JobService:
+    def create_job_service(self) -> JobService[T]:
         """Create a new UWS job metadata service."""
-        storage = FrontendJobStore(self._session)
+        storage = FrontendJobStore(self._session, self._param_type)
         return JobService(
-            config=self._config, policy=self._policy, storage=storage
+            config=self._config,
+            policy=self._policy,
+            storage=storage,
+            logger=self._logger,
         )
-
-    def create_templates(self) -> UWSTemplates:
-        """Create a new XML renderer for responses."""
-        return UWSTemplates(self._result_store)
 
 
 class UWSDependency:
@@ -70,24 +64,20 @@ class UWSDependency:
     def __init__(self) -> None:
         self._config: Optional[UWSConfig] = None
         self._policy: Optional[UWSPolicy] = None
-        self._result_store: Optional[ResultStore] = None
+        self._param_type: Optional[type[BaseModel]] = None
 
     async def __call__(
         self,
         session: async_scoped_session = Depends(db_session_dependency),
         logger: BoundLogger = Depends(logger_dependency),
     ) -> UWSFactory:
-        # Tell mypy that not calling initialize first is an error.  This would
-        # fail anyway without the asserts when something tried to use the None
-        # value.
-        assert self._config, "UWSDependency not initialized"
-        assert self._policy, "UWSDependency not initialized"
-        assert self._result_store, "UWSDependency not initialized"
+        if not self._config or not self._policy or not self._param_type:
+            raise RuntimeError("UWSDependency not initialized")
         return UWSFactory(
             config=self._config,
             policy=self._policy,
             session=session,
-            result_store=self._result_store,
+            param_type=self._param_type,
             logger=logger,
         )
 
@@ -100,6 +90,7 @@ class UWSDependency:
         *,
         config: UWSConfig,
         policy: UWSPolicy,
+        param_type: type[BaseModel],
         logger: BoundLogger,
     ) -> None:
         """Initialize the UWS subsystem.
@@ -110,6 +101,8 @@ class UWSDependency:
             The UWS configuration.
         policy
             The UWS policy layer.
+        param_type
+            The type of the job parameters.
         logger
             Logger to use during database initialization.  This is not saved;
             subsequent invocations as a dependency will create a new logger
@@ -117,7 +110,7 @@ class UWSDependency:
         """
         self._config = config
         self._policy = policy
-        self._result_store = ResultStore(config)
+        self._param_type = param_type
         await db_session_dependency.initialize(
             config.database_url,
             config.database_password,
@@ -138,30 +131,3 @@ class UWSDependency:
 
 
 uws_dependency = UWSDependency()
-
-
-async def uws_post_params_dependency(request: Request) -> list[JobParameter]:
-    """Parse POST parameters.
-
-    UWS requires that all POST parameters be case-insensitive, which is not
-    supported by FastAPI or Starlette.  POST parameters therefore have to be
-    parsed by this dependency and then extracted from the resulting
-    `~vocutouts.uws.models.JobParameter` list (which unfortunately also means
-    revalidating their types).
-
-    The POST parameters can also be (and should be) listed independently as
-    dependencies using the normal FastAPI syntax, in order to populate the
-    OpenAPI schema, but unfortunately they all have to be listed as optional
-    from FastAPI's perspective because they may be present using different
-    capitalization.
-    """
-    if request.method != "POST":
-        raise ValueError("uws_post_params_dependency used for non-POST route")
-    parameters = []
-    for key, value in (await request.form()).items():
-        if not isinstance(value, str):
-            raise ValueError("File upload not supported")
-        parameters.append(
-            JobParameter(parameter_id=key.lower(), value=value, is_post=True)
-        )
-    return parameters
