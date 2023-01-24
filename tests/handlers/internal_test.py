@@ -1,11 +1,11 @@
-"""Tests for the ivoacutoutpoc.handlers.internal module and routes."""
+"""Tests for the vocutouts.handlers.internal module and routes."""
 
 from __future__ import annotations
 
 import pytest
 from httpx import AsyncClient
 
-from ivoacutoutpoc.config import config
+from vocutouts.config import config
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-"""Models for ivoa-cutout-poc."""
+"""Models for vo-cutouts."""
 
 from pydantic import BaseModel, Field
 from safir.metadata import Metadata as SafirMetadata

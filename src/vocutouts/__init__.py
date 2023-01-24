@@ -1,4 +1,4 @@
-"""The ivoa-cutout-poc service."""
+"""The vocutouts service."""
 
 __all__ = ["__version__"]
 

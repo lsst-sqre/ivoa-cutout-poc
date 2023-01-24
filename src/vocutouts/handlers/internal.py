@@ -1,7 +1,7 @@
 """Internal HTTP handlers that serve relative to the root path, ``/``.
 
 These handlers aren't externally visible since the app is available at a path,
-``/ivoa-cutout-poc``. See `ivoacutoutpoc.handlers.external` for
+``/vocutouts``. See `vocutouts.handlers.external` for
 the external endpoint handlers.
 
 These handlers should be used for monitoring, health checks, internal status,
@@ -26,7 +26,6 @@ internal_router = APIRouter()
         " a health check. This route is not exposed outside the cluster and"
         " therefore cannot be used by external clients."
     ),
-    include_in_schema=False,
     response_model=Metadata,
     response_model_exclude_none=True,
     summary="Application metadata",
