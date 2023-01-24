@@ -174,9 +174,9 @@ httpx==0.23.3 \
     # via
     #   -c requirements/main.txt
     #   -r requirements/dev.in
-identify==2.5.13 \
-    --hash=sha256:8aa48ce56e38c28b6faa9f261075dea0a942dfbb42b341b4e711896cbb40f3f7 \
-    --hash=sha256:abb546bca6f470228785338a01b539de8a85bbf46491250ae03363956d8ebb10
+identify==2.5.15 \
+    --hash=sha256:1f4b36c5f50f3f950864b2a047308743f064eaa6f6645da5e5c780d1c7125487 \
+    --hash=sha256:c22aa206f47cc40486ecf585d27ad5f40adbfc494a3fa41dc3ed0499a23b123f
     # via pre-commit
 idna==3.4 \
     --hash=sha256:814f528e8dead7d329833b91c5faa87d60bf71824cd12a7530b5526063d02cb4 \
@@ -234,9 +234,7 @@ nodeenv==1.7.0 \
 packaging==23.0 \
     --hash=sha256:714ac14496c3e68c99c29b00845f7a2b85f3bb6f1078fd9f72fd20f0570002b2 \
     --hash=sha256:b6ad297f8907de0fa2fe1ccbd26fdaf387f5f47c7275fedf8cce89f99446cf97
-    # via
-    #   -c requirements/main.txt
-    #   pytest
+    # via pytest
 platformdirs==2.6.2 \
     --hash=sha256:83c8f6d04389165de7c9b6f0c682439697887bca0aa2f1c87ef1826be3584490 \
     --hash=sha256:e1fea1fe471b9ff8332e229df3cb7de4f53eeea4998d3b6bfff542115e998bd2
@@ -245,13 +243,13 @@ pluggy==1.0.0 \
     --hash=sha256:4224373bacce55f955a878bf9cfa763c1e360858e330072059e10bad68531159 \
     --hash=sha256:74134bbf457f031a36d68416e1509f34bd5ccc019f0bcc952c7b909d06b37bd3
     # via pytest
-pre-commit==2.21.0 \
-    --hash=sha256:31ef31af7e474a8d8995027fefdfcf509b5c913ff31f2015b4ec4beb26a6f658 \
-    --hash=sha256:e2f91727039fc39a92f58a588a25b87f936de6567eed4f0e673e0507edc75bad
+pre-commit==3.0.0 \
+    --hash=sha256:6af0a0b4137c0903794632f77b7223c4af0373f5cd3337056d2dab32aa3a5caf \
+    --hash=sha256:de265f74325f0c3ff1a727a974449315ea9b11975cf6b02c11f26e50acfa48f1
     # via -r requirements/dev.in
-pytest==7.2.0 \
-    --hash=sha256:892f933d339f068883b6fd5a459f03d85bfcb355e4981e146d2c7616c21fef71 \
-    --hash=sha256:c4014eb40e10f11f355ad4e3c2fb2c6c6d1919c73f3b5a433de4708202cade59
+pytest==7.2.1 \
+    --hash=sha256:c7c6ca206e93355074ae32f7403e8ea12163b1163c976fee7d4d84027c162be5 \
+    --hash=sha256:d45e0952f3727241918b8fd0f376f5ff6b301cc0777c6f9a556935c92d8a7d42
     # via
     #   -r requirements/dev.in
     #   pytest-asyncio
@@ -373,9 +371,9 @@ sqlalchemy[asyncio,mypy]==1.4.46 \
     # via
     #   -c requirements/main.txt
     #   -r requirements/dev.in
-sqlalchemy2-stubs==0.0.2a31 \
-    --hash=sha256:18e70515eec96c48825f3e1da0c60b04e155593213e25eb28c4cee994a315e4d \
-    --hash=sha256:515a97fbe4b7cd299b43166c51ce6f356f1222128bf2ba57b0619ce8d89dfab4
+sqlalchemy2-stubs==0.0.2a32 \
+    --hash=sha256:2a2cfab71d35ac63bf21ad841d8610cd93a3bd4c6562848c538fa975585c2739 \
+    --hash=sha256:7f5fb30b0cf7c6b74c50c1d94df77ff32007afee8d80499752eb3fedffdbdfb8
     # via sqlalchemy
 typing-extensions==4.4.0 \
     --hash=sha256:1511434bb92bf8dd198c12b1cc812e800d4181cfcb867674e0f8279cc93087aa \
