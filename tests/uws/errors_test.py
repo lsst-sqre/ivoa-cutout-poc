@@ -49,6 +49,10 @@ async def test_errors(client: AsyncClient, uws_factory: UWSFactory) -> None:
     r = await client.post("/jobs/1/start", json={"start": False})
     assert r.status_code == 422
 
+    # Can't start with non-JSON POST.
+    r = await client.post("/jobs/1/start", data={"start": True})
+    assert r.status_code == 422
+
     # Wrong user specified.
     r = await client.post(
         "/jobs/1/start",
