@@ -6,19 +6,17 @@
 #     make update-deps
 
 # These dependencies are for fastapi including some optional features.
-fastapi!=0.89.0
+fastapi
 python-multipart
 starlette
 uvicorn[standard]
 
 # Other dependencies.
-astropy
 asyncpg
 click
 dramatiq[redis]
 google-auth
 google-cloud-storage
-jinja2
 psycopg2
 safir[db,gcs]
 sqlalchemy[asyncio]
@@ -27,3 +25,7 @@ structlog
 # Uncomment this, change the branch, comment out safir above, and run make
 # update-deps-no-hashes to test against an unreleased version of Safir.
 #git+https://github.com/lsst-sqre/safir@main#egg=safir[db,gcs]
+
+# src/vocutouts/workers.py has additional dependencies that aren't noted
+# here, since that code is only executed in the separate worker container,
+# which uses the Rubin stack.
