@@ -4,27 +4,37 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Generic, Optional, TypeVar
 
 from dramatiq import Message
+from pydantic import BaseModel
+from safir.gcs import SignedURLService
+from structlog.stdlib import BoundLogger
 
 from .config import UWSConfig
-from .exceptions import InvalidPhaseError, PermissionDeniedError
+from .exceptions import (
+    InvalidPhaseError,
+    PermissionDeniedError,
+    SyncTimeoutError,
+    TaskError,
+)
 from .models import (
     ACTIVE_PHASES,
     Availability,
     ExecutionPhase,
     Job,
     JobDescription,
-    JobParameter,
+    JobUpdate,
 )
 from .policy import UWSPolicy
 from .storage import FrontendJobStore
 
+T = TypeVar("T", bound=BaseModel)
+
 __all__ = ["JobService"]
 
 
-class JobService:
+class JobService(Generic[T]):
     """Dispatch and track UWS jobs.
 
     The goal of this layer is to encapsulate the machinery of a service that
@@ -48,11 +58,17 @@ class JobService:
         *,
         config: UWSConfig,
         policy: UWSPolicy,
-        storage: FrontendJobStore,
+        storage: FrontendJobStore[T],
+        logger: BoundLogger,
     ) -> None:
         self._config = config
         self._policy = policy
         self._storage = storage
+        self._logger = logger
+        self._url_service = SignedURLService(
+            service_account=config.signing_service_account,
+            lifetime=timedelta(seconds=config.url_lifetime),
+        )
 
     async def availability(self) -> Availability:
         """Check whether the service is up.
@@ -71,10 +87,10 @@ class JobService:
     async def create(
         self,
         user: str,
+        params: T,
         *,
         run_id: Optional[str] = None,
-        params: list[JobParameter],
-    ) -> Job:
+    ) -> Job[T]:
         """Create a pending job.
 
         This does not start execution of the job.  That must be done
@@ -84,15 +100,15 @@ class JobService:
         ----------
         user
             User on behalf this operation is performed.
-        run_id
-            A client-supplied opaque identifier to record with the job.
         params
             The input parameters to the job.
+        run_id
+            A client-supplied opaque identifier to record with the job.
 
         Returns
         -------
         vocutouts.uws.models.Job
-            The internal representation of the newly-created job.
+            The details of the newly-created job.
         """
         self._policy.validate_params(params)
         return await self._storage.add(
@@ -118,7 +134,7 @@ class JobService:
         job = await self._storage.get(job_id)
         if job.owner != user:
             raise PermissionDeniedError(f"Access to job {job_id} denied")
-        return await self._storage.delete(job_id)
+        await self._storage.delete(job_id)
 
     async def get(
         self,
@@ -128,7 +144,7 @@ class JobService:
         wait: Optional[int] = None,
         wait_phase: Optional[ExecutionPhase] = None,
         wait_for_completion: bool = False,
-    ) -> Job:
+    ) -> Job[T]:
         """Retrieve a job.
 
         This also supports long-polling, to implement UWS 1.1 blocking
@@ -210,7 +226,71 @@ class JobService:
                 if now + timedelta(seconds=delay) > end_time:
                     delay = (end_time - now).total_seconds()
 
+        # Convert result URLs to signed URLs.
+        if job.results:
+            for result in job.results:
+                result.url = self._url_service.signed_url(
+                    result.url, result.mime_type
+                )
+
         return job
+
+    async def get_first_result(self, user: str, job_id: str) -> str:
+        """Wait for a job to complete and get the URL of the first result.
+
+        Used to implement sync routes that return a single result.
+
+        Parameters
+        ----------
+        user
+            User on behalf this operation is performed.
+        job_id
+            Identifier of the job.
+
+        Returns
+        -------
+        str
+            URL of the first result.
+
+        Raises
+        ------
+        UWSError
+            If synchronous execution of the job failed.
+        """
+        job = await self.get(
+            user,
+            job_id,
+            wait=self._config.sync_timeout,
+            wait_for_completion=True,
+        )
+        if job.run_id:
+            logger = self._logger.bind(run_id=job.run_id)
+        else:
+            logger = self._logger
+
+        # Check for error states.
+        if job.phase not in (ExecutionPhase.COMPLETED, ExecutionPhase.ERROR):
+            logger.warning("Job timed out", job_id=job.job_id)
+            msg = f"Cutout did not complete in {self._config.sync_timeout}s"
+            raise SyncTimeoutError(msg)
+        if job.error:
+            logger.warning(
+                "Job failed",
+                job_id=job.job_id,
+                error_code=job.error.error_code,
+                error=job.error.message,
+                error_detail=job.error.detail,
+            )
+            raise TaskError(
+                job.error.error_code, job.error.message, job.error.detail
+            )
+        if not job.results:
+            logger.warning("Job returned no results", job_id=job.job_id)
+            msg = "Job did not return any results"
+            raise TaskError("no_results", msg)
+
+        # Redirect to the URL of the first result.
+        return job.results[0].url
 
     async def list_jobs(
         self,
@@ -243,6 +323,40 @@ class JobService:
             user, phases=phases, after=after, count=count
         )
 
+    async def update(self, user: str, job_id: str, update: JobUpdate) -> None:
+        """Update a job.
+
+        Parameters
+        ----------
+        user
+            User on behalf of whom this operation is performed.
+        job_id
+            Identifier of the job to start.
+        update
+            Job properties to change.
+
+        Raises
+        ------
+        vocutouts.uws.exceptions.PermissionDeniedError
+            If the job ID doesn't exist or is for a user other than the
+            provided user.
+        """
+        job = await self._storage.get(job_id)
+        if job.owner != user:
+            raise PermissionDeniedError(f"Access to job {job_id} denied")
+        if update.destruction_time:
+            destruction = self._policy.validate_destruction(
+                update.destruction_time, job
+            )
+            if destruction != job.destruction_time:
+                await self._storage.update_destruction(job_id, destruction)
+        if update.execution_duration:
+            duration = self._policy.validate_execution_duration(
+                update.execution_duration, job
+            )
+            if duration != job.execution_duration:
+                await self._storage.update_execution_duration(job_id, duration)
+
     async def start(self, user: str, job_id: str) -> Message:
         """Start execution of a job.
 
@@ -272,79 +386,3 @@ class JobService:
         message = self._policy.dispatch(job)
         await self._storage.mark_queued(job_id, message.message_id)
         return message
-
-    async def update_destruction(
-        self, user: str, job_id: str, destruction: datetime
-    ) -> datetime | None:
-        """Update the destruction time of a job.
-
-        Parameters
-        ----------
-        user
-            User on behalf of whom this operation is performed
-        job_id
-            Identifier of the job to update.
-        destruction
-            The new job destruction time.  This may be arbitrarily modified
-            by the policy layer.
-
-        Returns
-        -------
-        datetime.datetime or None
-            The new destruction time of the job (possibly modified by the
-            policy layer), or `None` if the destruction time of the job was
-            not changed.
-
-        Raises
-        ------
-        vocutouts.uws.exceptions.PermissionDeniedError
-            If the job ID doesn't exist or is for a user other than the
-            provided user.
-        """
-        job = await self._storage.get(job_id)
-        if job.owner != user:
-            raise PermissionDeniedError(f"Access to job {job_id} denied")
-        destruction = self._policy.validate_destruction(destruction, job)
-        if destruction == job.destruction_time:
-            return None
-        else:
-            await self._storage.update_destruction(job_id, destruction)
-            return destruction
-
-    async def update_execution_duration(
-        self, user: str, job_id: str, duration: int
-    ) -> int | None:
-        """Update the execution duration time of a job.
-
-        Parameters
-        ----------
-        user
-            User on behalf of whom this operation is performed
-        job_id
-            Identifier of the job to update.
-        duration
-            The new job execution duration.  This may be arbitrarily modified
-            by the policy layer.
-
-        Returns
-        -------
-        int or None
-            The new execution duration of the job (possibly modified by the
-            policy layer), or `None` if the execution duration of the job was
-            not changed.
-
-        Raises
-        ------
-        vocutouts.uws.exceptions.PermissionDeniedError
-            If the job ID doesn't exist or is for a user other than the
-            provided user.
-        """
-        job = await self._storage.get(job_id)
-        if job.owner != user:
-            raise PermissionDeniedError(f"Access to job {job_id} denied")
-        duration = self._policy.validate_execution_duration(duration, job)
-        if duration == job.execution_duration:
-            return None
-        else:
-            await self._storage.update_execution_duration(job_id, duration)
-            return duration

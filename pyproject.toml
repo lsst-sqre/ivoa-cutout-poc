@@ -23,7 +23,7 @@ dependencies = []
 dynamic = ["version"]
 
 [project.scripts]
-vo-cutouts = "vocutouts.cli:main"
+ivoa-cutout-poc = "vocutouts.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/lsst-sqre/ivoa-cutout-poc"

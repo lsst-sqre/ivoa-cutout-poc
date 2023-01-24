@@ -108,6 +108,7 @@ class Configuration:
         return UWSConfig(
             execution_duration=self.execution_duration,
             lifetime=self.lifetime,
+            sync_timeout=self.sync_timeout,
             database_url=self.database_url,
             database_password=self.database_password,
             redis_host=self.redis_host,

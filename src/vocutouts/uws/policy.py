@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from dramatiq import Message
+from pydantic import BaseModel
 
-from .models import Job, JobParameter
+from .models import Job
 
 __all__ = ["UWSPolicy"]
 
@@ -69,28 +70,27 @@ class UWSPolicy(ABC):
 
     @abstractmethod
     def validate_execution_duration(
-        self, execution_duration: int, job: Job
-    ) -> int:
+        self, execution_duration: timedelta, job: Job
+    ) -> timedelta:
         """Validate a new execution duration for a job.
 
         Parameters
         ----------
         execution_duration
-            New desired maximum execution time for the job in wall clock
-            seconds.
+            New desired maximum execution time for the job.
         job
             The existing job.
 
         Returns
         -------
-        int
+        datetime.timedelta
             The new execution duration for the job, which should be
             ``job.execution_duration`` if the policy layer doesn't want to
             allow any change.
         """
 
     @abstractmethod
-    def validate_params(self, params: list[JobParameter]) -> None:
+    def validate_params(self, params: BaseModel) -> None:
         """Validate parameters for a job.
 
         Parameters

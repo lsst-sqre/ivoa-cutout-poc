@@ -13,51 +13,18 @@ from dramatiq.middleware import CurrentMessage
 from httpx import AsyncClient
 from structlog.stdlib import BoundLogger
 
-from tests.support.uws import (
+from vocutouts.uws.config import UWSConfig
+from vocutouts.uws.dependencies import UWSFactory, uws_dependency
+from vocutouts.uws.exceptions import TaskError
+from vocutouts.uws.utils import isodatetime
+
+from ..support.uws import (
+    TrivialParameters,
     TrivialPolicy,
     job_started,
     uws_broker,
     wait_for_job,
 )
-from vocutouts.uws.config import UWSConfig
-from vocutouts.uws.dependencies import UWSFactory, uws_dependency
-from vocutouts.uws.exceptions import TaskFatalError, TaskTransientError
-from vocutouts.uws.models import ErrorCode, JobParameter
-from vocutouts.uws.utils import isodatetime
-
-ERRORED_JOB = """
-<uws:job
-    version="1.1"
-    xsi:schemaLocation="http://www.ivoa.net/xml/UWS/v1.0 UWS.xsd"
-    xmlns:xml="http://www.w3.org/XML/1998/namespace"
-    xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0"
-    xmlns:xlink="http://www.w3.org/1999/xlink"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <uws:jobId>1</uws:jobId>
-  <uws:ownerId>user</uws:ownerId>
-  <uws:phase>ERROR</uws:phase>
-  <uws:creationTime>{}</uws:creationTime>
-  <uws:startTime>{}</uws:startTime>
-  <uws:endTime>{}</uws:endTime>
-  <uws:executionDuration>600</uws:executionDuration>
-  <uws:destruction>{}</uws:destruction>
-  <uws:parameters>
-    <uws:parameter id="id">1:2:a:b</uws:parameter>
-  </uws:parameters>
-  <uws:errorSummary type="{}" hasDetail="{}">
-    <uws:message>{}</uws:message>
-  </uws:errorSummary>
-</uws:job>
-"""
-
-JOB_ERROR_SUMMARY = """
-<?xml version="1.0" encoding="UTF-8"?>
-<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
-  <INFO name="QUERY_STATUS" value="ERROR">
-{}
-  </INFO>
-</VOTABLE>
-"""
 
 
 @pytest.mark.asyncio
@@ -69,14 +36,13 @@ async def test_temporary_error(
 ) -> None:
     job_service = uws_factory.create_job_service()
     job = await job_service.create(
-        "user", params=[JobParameter(parameter_id="id", value="1:2:a:b")]
+        "user", params=TrivialParameters(id="1:2:a:b")
     )
 
     # The pending job has no error.
-    r = await client.get(
-        "/jobs/1/error", headers={"X-Auth-Request-User": "user"}
-    )
-    assert r.status_code == 404
+    r = await client.get("/jobs/1", headers={"X-Auth-Request-User": "user"})
+    assert r.status_code == 200
+    assert not r.json().get("error")
 
     # Create a backend worker that raises a transient error.
     @dramatiq.actor(broker=uws_broker, queue_name="job")
@@ -85,16 +51,14 @@ async def test_temporary_error(
         now = datetime.now(tz=timezone.utc)
         job_started.send(job_id, message.message_id, isodatetime(now))
         time.sleep(0.5)
-        raise TaskTransientError(
-            ErrorCode.USAGE_ERROR, "UsageError Something failed"
-        )
+        raise TaskError("usage_error", "Something failed")
 
     # Start the job.
     uws_dependency.override_policy(TrivialPolicy(error_transient_job))
     r = await client.post(
-        "/jobs/1/phase",
+        "/jobs/1/start",
         headers={"X-Auth-Request-User": "user"},
-        data={"PHASE": "RUN"},
+        json={"start": True},
     )
     assert r.status_code == 303
     worker = Worker(uws_broker, worker_timeout=100)
@@ -105,28 +69,26 @@ async def test_temporary_error(
         job = await wait_for_job(job_service, "user", "1")
         assert job.start_time
         assert job.end_time
+        assert job.destruction_time
         r = await client.get(
             "/jobs/1", headers={"X-Auth-Request-User": "user"}
         )
         assert r.status_code == 200
-        assert r.text == ERRORED_JOB.strip().format(
-            isodatetime(job.creation_time),
-            isodatetime(job.start_time),
-            isodatetime(job.end_time),
-            isodatetime(job.destruction_time),
-            "transient",
-            "false",
-            "UsageError Something failed",
-        )
-
-        # Retrieve the error separately.
-        r = await client.get(
-            "/jobs/1/error", headers={"X-Auth-Request-User": "user"}
-        )
-        assert r.status_code == 200
-        assert r.text == JOB_ERROR_SUMMARY.strip().format(
-            "UsageError Something failed"
-        )
+        assert r.json() == {
+            "job_id": "1",
+            "owner": "user",
+            "phase": "error",
+            "creation_time": isodatetime(job.creation_time),
+            "start_time": isodatetime(job.start_time),
+            "end_time": isodatetime(job.end_time),
+            "execution_duration": 600,
+            "destruction_time": isodatetime(job.destruction_time),
+            "parameters": {"id": "1:2:a:b"},
+            "error": {
+                "error_code": "usage_error",
+                "message": "Something failed",
+            },
+        }
     finally:
         worker.stop()
 
@@ -140,7 +102,7 @@ async def test_fatal_error(
 ) -> None:
     job_service = uws_factory.create_job_service()
     job = await job_service.create(
-        "user", params=[JobParameter(parameter_id="id", value="1:2:a:b")]
+        "user", params=TrivialParameters(id="1:2:a:b")
     )
 
     # Create a backend worker that raises a fatal error with detail.
@@ -150,14 +112,14 @@ async def test_fatal_error(
         now = datetime.now(tz=timezone.utc)
         job_started.send(job_id, message.message_id, isodatetime(now))
         time.sleep(0.5)
-        raise TaskFatalError(ErrorCode.ERROR, "Error Whoops\nSome details")
+        raise TaskError("something", "Whoops", "Some details")
 
     # Start the job.
     uws_dependency.override_policy(TrivialPolicy(error_fatal_job))
     r = await client.post(
-        "/jobs/1/phase",
+        "/jobs/1/start",
         headers={"X-Auth-Request-User": "user"},
-        data={"PHASE": "RUN"},
+        json={"start": True},
     )
     assert r.status_code == 303
     worker = Worker(uws_broker, worker_timeout=100)
@@ -168,28 +130,27 @@ async def test_fatal_error(
         job = await wait_for_job(job_service, "user", "1")
         assert job.start_time
         assert job.end_time
+        assert job.destruction_time
         r = await client.get(
             "/jobs/1", headers={"X-Auth-Request-User": "user"}
         )
         assert r.status_code == 200
-        assert r.text == ERRORED_JOB.strip().format(
-            isodatetime(job.creation_time),
-            isodatetime(job.start_time),
-            isodatetime(job.end_time),
-            isodatetime(job.destruction_time),
-            "fatal",
-            "true",
-            "Error Whoops",
-        )
-
-        # Retrieve the error separately.
-        r = await client.get(
-            "/jobs/1/error", headers={"X-Auth-Request-User": "user"}
-        )
-        assert r.status_code == 200
-        assert r.text == JOB_ERROR_SUMMARY.strip().format(
-            "Error Whoops\n\nSome details"
-        )
+        assert r.json() == {
+            "job_id": "1",
+            "owner": "user",
+            "phase": "error",
+            "creation_time": isodatetime(job.creation_time),
+            "start_time": isodatetime(job.start_time),
+            "end_time": isodatetime(job.end_time),
+            "execution_duration": 600,
+            "destruction_time": isodatetime(job.destruction_time),
+            "parameters": {"id": "1:2:a:b"},
+            "error": {
+                "error_code": "something",
+                "message": "Whoops",
+                "detail": "Some details",
+            },
+        }
     finally:
         worker.stop()
 
@@ -203,7 +164,7 @@ async def test_unknown_error(
 ) -> None:
     job_service = uws_factory.create_job_service()
     job = await job_service.create(
-        "user", params=[JobParameter(parameter_id="id", value="1:2:a:b")]
+        "user", params=TrivialParameters(id="1:2:a:b")
     )
 
     # Create a backend worker that raises a fatal error with detail.
@@ -218,9 +179,9 @@ async def test_unknown_error(
     # Start the job.
     uws_dependency.override_policy(TrivialPolicy(error_unknown_job))
     r = await client.post(
-        "/jobs/1/phase",
+        "/jobs/1/start",
         headers={"X-Auth-Request-User": "user"},
-        data={"PHASE": "RUN"},
+        json={"start": True},
     )
     assert r.status_code == 303
     worker = Worker(uws_broker, worker_timeout=100)
@@ -231,28 +192,26 @@ async def test_unknown_error(
         job = await wait_for_job(job_service, "user", "1")
         assert job.start_time
         assert job.end_time
+        assert job.destruction_time
         r = await client.get(
             "/jobs/1", headers={"X-Auth-Request-User": "user"}
         )
         assert r.status_code == 200
-        assert r.text == ERRORED_JOB.strip().format(
-            isodatetime(job.creation_time),
-            isodatetime(job.start_time),
-            isodatetime(job.end_time),
-            isodatetime(job.destruction_time),
-            "transient",
-            "true",
-            "Error Unknown error executing task",
-        )
-
-        # Retrieve the error separately.
-        r = await client.get(
-            "/jobs/1/error", headers={"X-Auth-Request-User": "user"}
-        )
-        assert r.status_code == 200
-        assert r.text == JOB_ERROR_SUMMARY.strip().format(
-            "Error Unknown error executing task\n\n"
-            "ValueError: Unknown exception"
-        )
+        assert r.json() == {
+            "job_id": "1",
+            "owner": "user",
+            "phase": "error",
+            "creation_time": isodatetime(job.creation_time),
+            "start_time": isodatetime(job.start_time),
+            "end_time": isodatetime(job.end_time),
+            "execution_duration": 600,
+            "destruction_time": isodatetime(job.destruction_time),
+            "parameters": {"id": "1:2:a:b"},
+            "error": {
+                "error_code": "unknown_error",
+                "message": "Unknown error executing task",
+                "detail": "ValueError: Unknown exception",
+            },
+        }
     finally:
         worker.stop()

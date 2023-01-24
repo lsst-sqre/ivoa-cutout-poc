@@ -34,6 +34,9 @@ class UWSConfig:
     deleted.
     """
 
+    sync_timeout: int
+    """The timeout for results from a sync cutout in seconds."""
+
     database_url: str
     """URL for the metadata database."""
 

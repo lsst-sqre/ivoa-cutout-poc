@@ -130,8 +130,7 @@ def uws_job_failed(
         logger.info(
             "Marked job as failed",
             job_id=job_id,
-            error_type=error.error_type.value,
-            error_code=error.error_code.value,
+            error_code=error.error_code,
             message=error.message,
             detail=error.detail,
         )

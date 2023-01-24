@@ -11,11 +11,11 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import Column, DateTime, Enum, Index, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 
-from ..models import ErrorCode, ErrorType, ExecutionPhase
+from ..models import ExecutionPhase
 from .base import Base
-from .job_parameter import JobParameter
 from .job_result import JobResult
 
 __all__ = ["Job"]
@@ -24,7 +24,7 @@ __all__ = ["Job"]
 class Job(Base):
     __tablename__ = "job"
 
-    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    job_id: int = Column(Integer, primary_key=True, autoincrement=True)
     message_id: str | None = Column(String(64))
     owner: str = Column(String(64), nullable=False)
     phase: ExecutionPhase = Column(Enum(ExecutionPhase), nullable=False)
@@ -35,14 +35,11 @@ class Job(Base):
     destruction_time: datetime = Column(DateTime, nullable=False)
     execution_duration: int = Column(Integer, nullable=False)
     quote: datetime | None = Column(DateTime)
-    error_type: ErrorType | None = Column(Enum(ErrorType))
-    error_code: ErrorCode | None = Column(Enum(ErrorCode))
+    error_code: str | None = Column(Text)
     error_message: str | None = Column(Text)
     error_detail: str | None = Column(Text)
+    parameters: str = Column(JSONB)
 
-    parameters: list[JobParameter] = relationship(
-        "JobParameter", cascade="delete", lazy="selectin", uselist=True
-    )
     results: list[JobResult] = relationship(
         "JobResult", cascade="delete", lazy="selectin", uselist=True
     )

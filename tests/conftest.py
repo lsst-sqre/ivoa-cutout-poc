@@ -30,12 +30,12 @@ from vocutouts.uws.utils import isodatetime
 @dramatiq.actor(queue_name="cutout", store_results=True)
 def cutout_test(
     job_id: str,
-    dataset_ids: list[str],
-    stencils: list[dict[str, Any]],
+    params: dict[str, Any],
 ) -> list[dict[str, Any]]:
     message = CurrentMessage.get_current_message()
     now = isodatetime(datetime.now(tz=timezone.utc))
     job_started.send(job_id, message.message_id, now)
+    dataset_ids = params["ids"]
     assert len(dataset_ids) == 1
     return [
         {

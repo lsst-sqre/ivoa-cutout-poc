@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from dramatiq import Actor, Message
+from pydantic import BaseModel
 from structlog.stdlib import BoundLogger
 
 from .actors import job_completed, job_failed
-from .exceptions import InvalidCutoutParameterError
 from .models.parameters import CutoutParameters
 from .models.stencils import RangeStencil
-from .uws.exceptions import MultiValuedParameterError, ParameterError
-from .uws.models import Job, JobParameter
+from .uws.exceptions import ParameterUnsupportedError
+from .uws.models import Job
 from .uws.policy import UWSPolicy
 
 __all__ = ["ImageCutoutPolicy"]
@@ -57,14 +57,12 @@ class ImageCutoutPolicy(UWSPolicy):
         Currently, only one dataset ID and only one stencil are supported.
         This limitation is expected to be relaxed in a later version.
         """
-        cutout_params = CutoutParameters.from_job_parameters(job.parameters)
+        duration = None
+        if job.execution_duration:
+            duration = job.execution_duration.total_seconds() * 1000
         return self._actor.send_with_options(
-            args=(
-                job.job_id,
-                cutout_params.ids,
-                [s.to_dict() for s in cutout_params.stencils],
-            ),
-            time_limit=job.execution_duration * 1000,
+            args=(job.job_id, job.parameters.dict()),
+            time_limit=duration,
             on_success=job_completed,
             on_failure=job_failed,
         )
@@ -72,26 +70,26 @@ class ImageCutoutPolicy(UWSPolicy):
     def validate_destruction(
         self, destruction: datetime, job: Job
     ) -> datetime:
-        return job.destruction_time
+        return job.destruction_time if job.destruction_time else destruction
 
     def validate_execution_duration(
-        self, execution_duration: int, job: Job
-    ) -> int:
-        return job.execution_duration
+        self, execution_duration: timedelta, job: Job
+    ) -> timedelta:
+        if job.execution_duration:
+            return job.execution_duration
+        else:
+            return execution_duration
 
-    def validate_params(self, params: list[JobParameter]) -> None:
-        try:
-            cutout_params = CutoutParameters.from_job_parameters(params)
-        except InvalidCutoutParameterError as e:
-            raise ParameterError(str(e)) from e
+    def validate_params(self, params: BaseModel) -> None:
+        if not isinstance(params, CutoutParameters):
+            raise RuntimeError("Invalid type for parameters")
 
         # For now, only support a single ID and stencil.
-        if len(cutout_params.ids) != 1:
-            raise MultiValuedParameterError("Only one ID supported")
-        if len(cutout_params.stencils) != 1:
-            raise MultiValuedParameterError("Only one stencil is supported")
+        if len(params.ids) != 1:
+            raise ParameterUnsupportedError("Only one ID supported")
+        if len(params.stencils) != 1:
+            raise ParameterUnsupportedError("Only one stencil is supported")
 
         # For now, range stencils are not supported.
-        stencil = cutout_params.stencils[0]
-        if isinstance(stencil, RangeStencil):
-            raise ParameterError("RANGE stencils are not supported")
+        if isinstance(params.stencils[0], RangeStencil):
+            raise ParameterUnsupportedError("Range stencils are not supported")

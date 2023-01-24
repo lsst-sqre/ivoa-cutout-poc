@@ -14,7 +14,7 @@ class JobResult(Base):
 
     id: int = Column(Integer, primary_key=True, autoincrement=True)
     job_id: int = Column(
-        Integer, ForeignKey("job.id", ondelete="CASCADE"), nullable=False
+        Integer, ForeignKey("job.job_id", ondelete="CASCADE"), nullable=False
     )
     result_id: str = Column(String(64), nullable=False)
     sequence: int = Column(Integer, nullable=False)

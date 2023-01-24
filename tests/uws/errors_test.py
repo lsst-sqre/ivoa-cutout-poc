@@ -2,132 +2,105 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import pytest
 from httpx import AsyncClient
 
 from vocutouts.uws.dependencies import UWSFactory
-from vocutouts.uws.models import JobParameter
 
-
-@dataclass
-class PostTest:
-    """Encapsulates the data a test POST."""
-
-    url: str
-    data: dict[str, str]
+from ..support.uws import TrivialParameters
 
 
 @pytest.mark.asyncio
 async def test_errors(client: AsyncClient, uws_factory: UWSFactory) -> None:
     job_service = uws_factory.create_job_service()
     await job_service.create(
-        "user",
-        run_id="some-run-id",
-        params=[
-            JobParameter(parameter_id="id", value="bar"),
-            JobParameter(parameter_id="circle", value="1 1 1"),
-        ],
+        "user", run_id="some-run-id", params=TrivialParameters(id="bar")
     )
 
     # No user specified.
-    routes = [
-        "/jobs/1",
-        "/jobs/1/destruction",
-        "/jobs/1/error",
-        "/jobs/1/executionduration",
-        "/jobs/1/owner",
-        "/jobs/1/parameters",
-        "/jobs/1/phase",
-        "/jobs/1/quote",
-        "/jobs/1/results",
-    ]
-    for route in routes:
-        r = await client.get(route)
-        assert r.status_code == 422
-        assert r.text.startswith("UsageError")
+    r = await client.get("/jobs/1")
+    assert r.status_code == 422
 
     # Wrong user specified.
-    for route in routes:
-        r = await client.get(
-            route, headers={"X-Auth-Request-User": "otheruser"}
-        )
-        assert r.status_code == 403
-        assert r.text.startswith("AuthorizationError")
+    r = await client.get(
+        "/jobs/1", headers={"X-Auth-Request-User": "otheruser"}
+    )
+    assert r.status_code == 403
 
     # Job does not exist.
-    for route in (r.replace("/1", "/2") for r in routes):
-        r = await client.get(route, headers={"X-Auth-Request-User": "user"})
-        assert r.status_code == 404
-        assert r.text.startswith("UsageError")
+    r = await client.get("/jobs/2", headers={"X-Auth-Request-User": "user"})
+    assert r.status_code == 404
 
-    # Check no user specified with POST routes.
-    tests = [
-        PostTest("/jobs/1", {"action": "DELETE"}),
-        PostTest(
-            "/jobs/1/destruction", {"destruction": "2021-09-10T10:01:02Z"}
-        ),
-        PostTest("/jobs/1/executionduration", {"executionduration": "1200"}),
-        PostTest("/jobs/1/phase", {"phase": "RUN"}),
-    ]
-    for test in tests:
-        r = await client.post(test.url, data=test.data)
-        assert r.status_code == 422
-        assert r.text.startswith("UsageError")
-
-    # Wrong user specified.
-    for test in tests:
-        r = await client.post(
-            test.url,
-            data=test.data,
-            headers={"X-Auth-Request-User": "otheruser"},
-        )
-        assert r.status_code == 403
-        assert r.text.startswith("AuthorizationError")
-
-    # Job does not exist.
-    for test in tests:
-        url = test.url.replace("/1", "/2")
-        r = await client.post(
-            url, data=test.data, headers={"X-Auth-Request-User": "user"}
-        )
-        assert r.status_code == 404
-        assert r.text.startswith("UsageError")
-
-    # Finally, test all the same things with the one supported DELETE.
+    # Check no user specified with modification routes.
+    r = await client.post("/jobs", json={"parameters": {"id": "foo"}})
+    assert r.status_code == 422
+    r = await client.post("/jobs/1/start", json={"start": True})
+    assert r.status_code == 422
+    r = await client.patch("/jobs/1", json={"execution_duration": 100})
+    assert r.status_code == 422
     r = await client.delete("/jobs/1")
     assert r.status_code == 422
-    assert r.text.startswith("UsageError")
+
+    # Body required for start.
+    r = await client.post("/jobs/1/start")
+    assert r.status_code == 422
+    r = await client.post("/jobs/1/start", json={"foo": "bar"})
+    assert r.status_code == 422
+    r = await client.post("/jobs/1/start", json={"start": False})
+    assert r.status_code == 422
+
+    # Can't start with non-JSON POST.
+    r = await client.post("/jobs/1/start", data={"start": True})
+    assert r.status_code == 422
+
+    # Wrong user specified.
+    r = await client.post(
+        "/jobs/1/start",
+        headers={"X-Auth-Request-User": "otheruser"},
+        json={"start": True},
+    )
+    assert r.status_code == 403
+    r = await client.patch(
+        "/jobs/1",
+        headers={"X-Auth-Request-User": "otheruser"},
+        json={"execution_duration": 100},
+    )
+    assert r.status_code == 403
     r = await client.delete(
         "/jobs/1", headers={"X-Auth-Request-User": "otheruser"}
     )
     assert r.status_code == 403
-    assert r.text.startswith("AuthorizationError")
+
+    # Job does not exist.
+    r = await client.post(
+        "/jobs/2/start",
+        headers={"X-Auth-Request-User": "user"},
+        json={"start": True},
+    )
+    assert r.status_code == 404
+    r = await client.patch(
+        "/jobs/2",
+        headers={"X-Auth-Request-User": "user"},
+        json={"execution_duration": 100},
+    )
+    assert r.status_code == 404
     r = await client.delete("/jobs/2", headers={"X-Auth-Request-User": "user"})
     assert r.status_code == 404
-    assert r.text.startswith("UsageError")
 
-    # Try some bogus destruction and execution duration parameters.
-    tests = [
-        PostTest("/jobs/1/destruction", {"destruction": "next tuesday"}),
-        PostTest("/jobs/1/destruction", {"DESTruction": "next tuesday"}),
-        PostTest(
-            "/jobs/1/destruction", {"destruction": "2021-09-10T10:01:02"}
-        ),
-        PostTest(
-            "/jobs/1/destruction", {"destrucTION": "2021-09-10T10:01:02"}
-        ),
-        PostTest("/jobs/1/executionduration", {"executionduration": "0"}),
-        PostTest("/jobs/1/executionduration", {"executionDUration": "0"}),
-        PostTest("/jobs/1/executionduration", {"executionduration": "-1"}),
-        PostTest("/jobs/1/executionduration", {"executionDUration": "-1"}),
-        PostTest("/jobs/1/executionduration", {"executionduration": "fred"}),
-        PostTest("/jobs/1/executionduration", {"executionDUration": "fred"}),
-    ]
-    for test in tests:
-        r = await client.post(
-            test.url, data=test.data, headers={"X-Auth-Request-User": "user"}
+    # Bogus destruction parameters.
+    for destruction in ("next tuesday", "2021-09-10T10:01:02"):
+        r = await client.patch(
+            "/jobs/1",
+            headers={"X-Auth-Request-User": "user"},
+            json={"destruction_time": destruction},
         )
-        assert r.status_code == 422
-        assert r.text.startswith("UsageError")
+        assert r.status_code == 422, f"destruction_time = {destruction}"
+
+    # Bogus execution duration parameters.
+    for duration in (0, -1, "fred"):
+        r = await client.patch(
+            "/jobs/1",
+            headers={"X-Auth-Request-User": "user"},
+            json={"execution_duration": duration},
+        )
+        assert r.status_code == 422, f"execution_duration = {duration}"

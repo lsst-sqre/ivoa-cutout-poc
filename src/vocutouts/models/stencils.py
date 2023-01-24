@@ -2,121 +2,71 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Any
+from abc import ABCMeta
+from typing import Literal
 
-from astropy import units as u
-from astropy.coordinates import Angle, SkyCoord
-
-Range = tuple[float, float]
+from pydantic import BaseModel, Field, validator
 
 
-class Stencil(ABC):
+class Point(BaseModel):
+    """Represents a point in the sky."""
+
+    ra: float = Field(..., title="ICRS ra in degrees")
+
+    dec: float = Field(..., title="ICRS dec in degrees")
+
+
+class Range(BaseModel):
+    """Represents a range of values."""
+
+    min: float = Field(..., title="Minimum value")
+
+    max: float = Field(..., title="Maximum value")
+
+
+class Stencil(BaseModel, metaclass=ABCMeta):
     """Base class for a stencil parameter."""
 
-    @classmethod
-    @abstractmethod
-    def from_string(cls, params: str) -> Stencil:
-        """Parse a string representation of stencil parameters to an object."""
-
-    @abstractmethod
-    def to_dict(self) -> dict[str, Any]:
-        """Convert the stencil to a JSON-serializable form for queuing."""
+    type: str = Field(..., title="Type of stencil")
 
 
-@dataclass
 class CircleStencil(Stencil):
-    """Represents a ``CIRCLE`` or ``POS=CIRCLE`` stencil."""
+    """Represents a circular stencil."""
 
-    center: SkyCoord
-    radius: Angle
+    type: Literal["circle"] = "circle"
 
-    @classmethod
-    def from_string(cls, params: str) -> CircleStencil:
-        ra, dec, radius = (float(p) for p in params.split())
-        return cls(
-            center=SkyCoord(ra * u.degree, dec * u.degree, frame="icrs"),
-            radius=Angle(radius * u.degree),
-        )
+    center: Point = Field(..., title="Center of circle")
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "circle",
-            "center": {
-                "ra": self.center.ra.degree,
-                "dec": self.center.dec.degree,
-            },
-            "radius": self.radius.degree,
-        }
+    radius: float = Field(..., title="Radius of circle")
 
 
-@dataclass
 class PolygonStencil(Stencil):
-    """Represents a ``POLYGON`` or ``POS=POLYGON`` stencil.
+    """Represents a polygon stencil."""
 
-    Represents the polygon defined by the given vertices.  Polygon winding
-    must be counter-clockwise when viewed from the origin towards the sky.
-    """
+    type: Literal["polygon"] = "polygon"
 
-    vertices: SkyCoord
+    vertices: list[Point] = Field(
+        ...,
+        title="Vertices of polygon",
+        description=(
+            "Polygon winding must be counter-clockwise when viewed from the"
+            " origin towards the sky."
+        ),
+    )
 
-    @classmethod
-    def from_string(cls, params: str) -> PolygonStencil:
-        data = [float(p) for p in params.split()]
-        if len(data) % 2 != 0:
-            msg = f"Odd number of coordinates in vertex list {params}"
-            raise ValueError(msg)
-        if len(data) < 6:
-            msg = "Polygons require at least three vertices"
-            raise ValueError(msg)
-        ras = []
-        decs = []
-        for i in range(0, len(data), 2):
-            ras.append(data[i])
-            decs.append(data[i + 1])
-        vertices = SkyCoord(ras * u.degree, decs * u.degree, frame="icrs")
-        return cls(vertices=vertices)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "polygon",
-            "vertices": [(v.ra.degree, v.dec.degree) for v in self.vertices],
-        }
+    @validator("vertices")
+    def _at_least_three(cls, v: list[Point]) -> list[Point]:
+        """Ensure there are at least three vertices."""
+        if len(v) < 3:
+            raise ValueError("Polygon must have at least three vertices")
+        return v
 
 
-@dataclass
 class RangeStencil(Stencil):
-    """Represents a ``POS=RANGE`` stencil."""
+    """Represents a range of ra and dec values."""
 
-    ra: Range
-    dec: Range
+    type: Literal["range"] = "range"
 
-    @classmethod
-    def from_string(cls, params: str) -> RangeStencil:
-        ra_min, ra_max, dec_min, dec_max = (float(p) for p in params.split())
-        return cls(
-            ra=(ra_min, ra_max),
-            dec=(dec_min, dec_max),
-        )
+    ra: Range = Field(..., title="Range of ICRS ra values")
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "range",
-            "ra": self.ra,
-            "dec": self.dec,
-        }
-
-
-def parse_stencil(stencil_type: str, params: str) -> Stencil:
-    """Convert a string stencil parameter to its internal representation."""
-    if stencil_type == "POS":
-        stencil_type, params = params.split(None, 1)
-    if stencil_type == "CIRCLE":
-        return CircleStencil.from_string(params)
-    elif stencil_type == "POLYGON":
-        return PolygonStencil.from_string(params)
-    elif stencil_type == "RANGE":
-        return RangeStencil.from_string(params)
-    else:
-        raise ValueError(f"Unknown stencil type {stencil_type}")
+    dec: Range = Field(..., title="Range of ICRS dec values")

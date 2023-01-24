@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import dramatiq
@@ -14,6 +14,7 @@ from dramatiq.brokers.stub import StubBroker
 from dramatiq.middleware import CurrentMessage, Middleware
 from dramatiq.results import Results
 from dramatiq.results.backends import StubBackend
+from pydantic import BaseModel, Field
 from safir.database import create_sync_session
 from sqlalchemy.future import select
 from sqlalchemy.orm import scoped_session
@@ -24,7 +25,7 @@ from vocutouts.uws.jobs import (
     uws_job_failed,
     uws_job_started,
 )
-from vocutouts.uws.models import ExecutionPhase, Job, JobParameter
+from vocutouts.uws.models import ExecutionPhase, Job, JobCreate
 from vocutouts.uws.policy import UWSPolicy
 from vocutouts.uws.schema import Job as SQLJob
 from vocutouts.uws.service import JobService
@@ -64,8 +65,26 @@ class WorkerSession(Middleware):
                 self._config.database_password,
                 logger,
                 isolation_level="REPEATABLE READ",
-                statement=select(SQLJob.id),
+                statement=select(SQLJob.job_id).limit(1),
             )
+
+
+class TrivialParameters(BaseModel):
+    """A simple set of parameters for a hypothetical job."""
+
+    id: str
+
+
+class TrivialJob(Job):
+    """The corresponding job model."""
+
+    parameters: TrivialParameters = Field(..., title="Job parameters")
+
+
+class TrivialJobCreate(JobCreate):
+    """The corresponding job creation model."""
+
+    parameters: TrivialParameters = Field(..., title="Job parameters")
 
 
 @dramatiq.actor(broker=uws_broker, queue_name="job", store_results=True)
@@ -127,11 +146,11 @@ class TrivialPolicy(UWSPolicy):
         return destruction
 
     def validate_execution_duration(
-        self, execution_duration: int, job: Job
-    ) -> int:
+        self, execution_duration: timedelta, job: Job
+    ) -> timedelta:
         return execution_duration
 
-    def validate_params(self, params: list[JobParameter]) -> None:
+    def validate_params(self, params: BaseModel) -> None:
         pass
 
 
@@ -144,6 +163,7 @@ def build_uws_config() -> UWSConfig:
     return UWSConfig(
         execution_duration=10 * 60,
         lifetime=24 * 60 * 60,
+        sync_timeout=60,
         database_url=os.environ["CUTOUT_DATABASE_URL"],
         database_password=os.getenv("CUTOUT_DATABASE_PASSWORD"),
         redis_host=os.getenv("CUTOUT_REDIS_HOST", "127.0.0.1"),
