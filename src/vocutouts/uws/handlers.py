@@ -83,10 +83,7 @@ def add_uws_routes(
         response_class=RedirectResponse,
         responses={
             303: {"description": "Redirect to result of successful cutout"},
-            400: {
-                "description": "Cutout job failed",
-                "content": {"text/plain": {}},
-            },
+            400: {"description": "Cutout job failed"},
         },
         status_code=303,
         summary="Synchronous cutout",
