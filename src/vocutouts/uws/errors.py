@@ -1,9 +1,4 @@
-"""Error handlers for UWS and DALI services.
-
-Currently these error handlers return ``text/plain`` errors.  VOTable errors
-may be a better choice, but revision 1.0 of the SODA standard only allows
-``text/plain`` errors for sync routes.
-"""
+"""Error handlers for UWS and DALI services."""
 
 from __future__ import annotations
 
