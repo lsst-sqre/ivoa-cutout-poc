@@ -184,6 +184,23 @@ class TaskError(UWSError):
         self.message = message
         self.detail = detail
 
+    def to_dict(self) -> dict[str, list[str] | str]:
+        """Convert the exception to a dictionary suitable for the exception.
+
+        Returns
+        -------
+        dict
+            Serialized error emssage to pass as the ``detail`` parameter to a
+            ``fastapi.HTTPException``.  It is designed to produce the same
+            JSON structure as native FastAPI errors.
+        """
+        if self.detail:
+            msg = f"{self.message}: {self.detail}"
+        else:
+            msg = self.message
+        error: dict[str, Any] = {"msg": msg, "type": self.error_code}
+        return error
+
     def to_job_error(self) -> JobError:
         """Convert to a `~vocutouts.uws.models.JobError`."""
         return JobError(
