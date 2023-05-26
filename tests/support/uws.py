@@ -25,7 +25,7 @@ from vocutouts.uws.jobs import (
     uws_job_failed,
     uws_job_started,
 )
-from vocutouts.uws.models import ExecutionPhase, Job, JobCreate
+from vocutouts.uws.models import AsyncJobCreate, ExecutionPhase, Job, JobCreate
 from vocutouts.uws.policy import UWSPolicy
 from vocutouts.uws.schema import Job as SQLJob
 from vocutouts.uws.service import JobService
@@ -82,6 +82,12 @@ class TrivialJob(Job):
 
 
 class TrivialJobCreate(JobCreate):
+    """The corresponding job creation model."""
+
+    parameters: TrivialParameters = Field(..., title="Job parameters")
+
+
+class TrivialAsyncJobCreate(AsyncJobCreate):
     """The corresponding job creation model."""
 
     parameters: TrivialParameters = Field(..., title="Job parameters")

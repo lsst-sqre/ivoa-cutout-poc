@@ -11,7 +11,11 @@ from safir.metadata import get_metadata
 from ..config import config
 from ..models.capabilities import Capabilities
 from ..models.index import Index
-from ..models.parameters import CutoutJob, CutoutJobCreate
+from ..models.parameters import (
+    CutoutAsyncJobCreate,
+    CutoutJob,
+    CutoutJobCreate,
+)
 from ..uws.dependencies import UWSFactory, uws_dependency
 from ..uws.handlers import add_uws_routes
 from ..uws.models import Availability
@@ -23,23 +27,16 @@ external_router = APIRouter()
 
 
 @external_router.get(
-    "/",
+    "",
     response_model=Index,
     response_model_exclude_none=True,
     summary="Application metadata",
+    description=(
+        "Metadata about the application, returned by a request for the root"
+        " of the external API."
+    ),
 )
 async def get_index() -> Index:
-    """GET ``/api/cutout/`` (the app's external root).
-
-    Customize this handler to return whatever the top-level resource of your
-    application should return. For example, consider listing key API URLs.
-    When doing so, also change or customize the response model in
-    `vocutouts.models.Index`.
-
-    By convention, the root of the external API includes a field called
-    ``metadata`` that provides the same Safir-generated metadata as the
-    internal root endpoint.
-    """
     metadata = get_metadata(
         package_name="ivoa-cutout-poc",
         application_name=config.name,
@@ -84,5 +81,6 @@ add_uws_routes(
     sync_prefix="/sync",
     async_prefix="/jobs",
     job_model=CutoutJob,
-    job_create_model=CutoutJobCreate,
+    job_sync_create_model=CutoutJobCreate,
+    job_async_create_model=CutoutAsyncJobCreate,
 )

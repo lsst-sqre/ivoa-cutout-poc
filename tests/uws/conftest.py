@@ -37,6 +37,7 @@ from vocutouts.uws.handlers import add_uws_routes
 from vocutouts.uws.schema import Base
 
 from ..support.uws import (
+    TrivialAsyncJobCreate,
     TrivialJob,
     TrivialJobCreate,
     TrivialParameters,
@@ -75,7 +76,8 @@ async def app(
         sync_prefix="/sync",
         async_prefix="/jobs",
         job_model=TrivialJob,
-        job_create_model=TrivialJobCreate,
+        job_sync_create_model=TrivialJobCreate,
+        job_async_create_model=TrivialAsyncJobCreate,
     )
     uws_app.include_router(router)
     uws_broker.add_middleware(WorkerSession(uws_config))
