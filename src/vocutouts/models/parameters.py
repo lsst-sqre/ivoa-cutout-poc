@@ -6,8 +6,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field, validator
 
-from ..uws.models import Job, JobCreate
+from ..uws.models import AsyncJobCreate, Job, JobCreate
 from .stencils import CircleStencil, PolygonStencil, RangeStencil
+
+__all__ = [
+    "CutoutAsyncJobCreate",
+    "CutoutJob",
+    "CutoutJobCreate",
+    "CutoutParameters",
+]
 
 
 class CutoutParameters(BaseModel):
@@ -34,6 +41,12 @@ class CutoutJob(Job):
 
 
 class CutoutJobCreate(JobCreate):
-    """The corresponding job creation model."""
+    """The sync job creation model."""
+
+    parameters: CutoutParameters = Field(..., title="Job parameters")
+
+
+class CutoutAsyncJobCreate(AsyncJobCreate):
+    """The async job creation model."""
 
     parameters: CutoutParameters = Field(..., title="Job parameters")

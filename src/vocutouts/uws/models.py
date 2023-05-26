@@ -272,12 +272,36 @@ class JobCreate(GenericModel, Generic[T]):
 
     parameters: T = Field(..., title="Parameters of the job")
 
+    run_id: Optional[str] = Field(
+        None,
+        title="Opaque string provided by client",
+        description=(
+            "This field is intended for the client to add a unique identifier"
+            " to all jobs that are part of a single operation from the"
+            " perspective of the client. This may aid in tracing issues"
+            " through a complex system, or identifying which operation a job"
+            " is part of."
+        ),
+        example="processing-run-40",
+    )
+
+
+class AsyncJobCreate(GenericModel, Generic[T]):
+    """Information required to create a new async job.
+
+    Notes
+    -----
+    As with `JobCreate`, users of the UWS library therefore must define a
+    subclass of this class that redeclares ``parameters`` with a concrete
+    class inheriting from ``pydantic.BaseModel``, and then pass that derived
+    class into `~vocutouts.uws.handlers.add_uws_routes`.
+    """
+
+    parameters: T = Field(..., title="Parameters of the job")
+
     start: bool = Field(
         False,
         title="Automatically start job",
-        description=(
-            "Ignored for sync jobs, which are always automatically started"
-        ),
     )
 
     run_id: Optional[str] = Field(

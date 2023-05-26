@@ -30,6 +30,7 @@ from structlog.stdlib import BoundLogger
 from .dependencies import UWSFactory, uws_dependency
 from .exceptions import ErrorLocation, PermissionDeniedError
 from .models import (
+    AsyncJobCreate,
     ExecutionPhase,
     Job,
     JobCreate,
@@ -39,8 +40,13 @@ from .models import (
 )
 
 T = TypeVar("T", bound=JobCreate)
+U = TypeVar("U", bound=AsyncJobCreate)
 
-__all__ = ["add_uws_routes"]
+__all__ = [
+    "add_uws_routes",
+    "T",
+    "U",
+]
 
 
 def add_uws_routes(
@@ -49,7 +55,8 @@ def add_uws_routes(
     sync_prefix: str,
     async_prefix: str,
     job_model: type[Job],
-    job_create_model: type[T],
+    job_sync_create_model: type[T],
+    job_async_create_model: type[U],
 ) -> None:
     """Add the UWS routes to an existing router.
 
@@ -68,8 +75,10 @@ def add_uws_routes(
         URL prefix under which to put async routes.
     job_model
         Type for the job model.
-    job_create_model
-        Type for the model used to create a job.
+    job_sync_create_model
+        Type for the model used to create a sync job.
+    job_async_create_model
+        Type for the model used to create an async job.
     """
 
     @router.post(
@@ -151,7 +160,7 @@ def add_uws_routes(
     )
     async def create_job(
         request: Request,
-        create: T,
+        create: U,
         user: str = Depends(auth_dependency),
         uws_factory: UWSFactory = Depends(uws_dependency),
         logger: BoundLogger = Depends(auth_logger_dependency),
@@ -287,5 +296,5 @@ def add_uws_routes(
     # to the empty dict.  Work around this by dynamically fixing the type
     # annotation to match the actual job creation model.  This may require
     # changes if type annotations are modified in future versions of Python.
-    post_sync.__annotations__["create"] = job_create_model
-    create_job.__annotations__["create"] = job_create_model
+    post_sync.__annotations__["create"] = job_sync_create_model
+    create_job.__annotations__["create"] = job_async_create_model
