@@ -171,7 +171,7 @@ def add_uws_routes(
         if create.start:
             await job_service.start(user, job.job_id)
             logger.info("Started job", job_id=job.job_id)
-        return request.url_for("get_job", job_id=job.job_id)
+        return str(request.url_for("get_job", job_id=job.job_id))
 
     @router.get(
         async_prefix + "/{job_id}",
@@ -281,7 +281,7 @@ def add_uws_routes(
             e.field = "job_id"
             raise
         logger.info("Started job", job_id=job_id)
-        return request.url_for("get_job", job_id=job_id)
+        return str(request.url_for("get_job", job_id=job_id))
 
     # This is deep magic to work around a Pydantic limitation.  Pydantic can't
     # handle TypeVar parameters to routes and instead treats them as
