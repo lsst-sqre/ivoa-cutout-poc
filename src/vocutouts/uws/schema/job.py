@@ -12,7 +12,7 @@ from datetime import datetime
 
 from sqlalchemy import Column, DateTime, Enum, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import Mapped, relationship
 
 from ..models import ExecutionPhase
 from .base import Base
@@ -40,7 +40,7 @@ class Job(Base):
     error_detail: str | None = Column(Text)
     parameters: str = Column(JSONB)
 
-    results: list[JobResult] = relationship(
+    results: Mapped[list[JobResult]] = relationship(
         "JobResult", cascade="delete", lazy="selectin", uselist=True
     )
 

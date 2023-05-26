@@ -64,7 +64,7 @@ def _convert_job(job: SQLJob, param_type: type[T]) -> Job[T]:
         start_time=datetime_from_db(job.start_time),
         end_time=datetime_from_db(job.end_time),
         destruction_time=datetime_from_db(job.destruction_time),
-        execution_duration=job.execution_duration,
+        execution_duration=timedelta(seconds=job.execution_duration),
         quote=job.quote,
         parameters=param_type.parse_raw(job.parameters),
         results=results if results else None,

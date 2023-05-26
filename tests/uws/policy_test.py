@@ -13,7 +13,7 @@ from vocutouts.uws.dependencies import UWSFactory, uws_dependency
 from vocutouts.uws.models import Job
 from vocutouts.uws.utils import isodatetime, parse_isodatetime
 
-from ..support.uws import TrivialParameters, TrivialPolicy
+from ..support.uws import TrivialParameters, TrivialPolicy, trivial_job
 
 
 class Policy(TrivialPolicy):
@@ -39,8 +39,8 @@ class Policy(TrivialPolicy):
 async def test_policy(
     client: AsyncClient, uws_factory: UWSFactory, uws_config: UWSConfig
 ) -> None:
-    uws_dependency.override_policy(Policy(uws_config))
-    uws_factory._policy = Policy(uws_config)
+    uws_dependency.override_policy(Policy(trivial_job))
+    uws_factory._policy = Policy(trivial_job)
     job_service = uws_factory.create_job_service()
 
     # Check parameter rejection.

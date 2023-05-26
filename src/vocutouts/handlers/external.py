@@ -68,11 +68,13 @@ async def get_availability(
     summary="IVOA service capabilities",
 )
 async def get_capabilities(request: Request) -> Capabilities:
-    return Capabilities(
-        availability_url=request.url_for("get_availability"),
-        capabilities_url=request.url_for("get_capabilities"),
-        soda_sync_url=request.url_for("post_sync"),
-        soda_async_url=request.url_for("create_job"),
+    return Capabilities.parse_obj(
+        {
+            "availability_url": str(request.url_for("get_availability")),
+            "capabilities_url": str(request.url_for("get_capabilities")),
+            "soda_sync_url": str(request.url_for("post_sync")),
+            "soda_async_url": str(request.url_for("create_job")),
+        }
     )
 
 
